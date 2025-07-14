@@ -1,7 +1,6 @@
 streamlit
 numpy
 opencv-python
-cv2
 plotly
 pillow
 matplotlib
