@@ -1,930 +1,911 @@
 import streamlit as st
-import numpy as np
-import cv2
-import plotly.graph_objects as go
-from PIL import Image
-from matplotlib import colors as mcolors
-from scipy.interpolate import interp1d
 import pandas as pd
-
-
-# --- FUNÇÕES AUXILIARES ---
-
-def pixel_to_data_coords(x_pixel, y_pixel, x_range_full, y_range_full, px_left, px_bottom, px_right, px_top):
-    """
-    Converte coordenadas de pixel de uma imagem para coordenadas de dados (ângulo/torque),
-    assumindo que o retângulo (px_left, px_bottom, px_right, px_top) na imagem corresponde
-    ao intervalo de dados (x_range_full, y_range_full).
-
-    Args:
-        x_pixel (int): Coordenada X do pixel.
-        y_pixel (int): Coordenada Y do pixel.
-        x_range_full (tuple): (x_min, x_max) do range de dados.
-        y_range_full (tuple): (y_min, y_max) do range de dados.
-        px_left (int): Coordenada X do pixel do lado esquerdo da área de plotagem.
-        px_bottom (int): Coordenada Y do pixel do lado inferior da área de plotagem.
-        px_right (int): Coordenada X do pixel do lado direito da área de plotagem.
-        px_top (int): Coordenada Y do pixel do lado superior da área de plotagem.
-
-    Returns:
-        tuple: (x_data, y_data) - Coordenadas de dados convertidas.
-    """
-    data_x_min, data_x_max = x_range_full
-    data_y_min, data_y_max = y_range_full
-
-    # Calcula a largura e altura em pixels da área de plotagem detectada
-    pixel_width_of_plot = px_right - px_left
-    pixel_height_of_plot = px_bottom - px_top  # Y pixels aumentam para baixo, então a altura é bottom - top
-
-    if pixel_width_of_plot <= 0 or pixel_height_of_plot <= 0:
-        st.warning(
-            f"Largura ou altura da área de plotagem inválida: Largura={pixel_width_of_plot}, Altura={pixel_height_of_plot}. Retornando NaN para dados.")
-        return np.nan, np.nan  # Evita divisão por zero e indica erro
-
-    # Calcula as escalas (unidades de dados por pixel)
-    scale_x = (data_x_max - data_x_min) / pixel_width_of_plot
-    scale_y = (data_y_max - data_y_min) / pixel_height_of_plot
-
-    # Converte pixel para dado
-    # x_data: Começa no data_x_min e avança com a escala_x em relação ao px_left
-    x_data = data_x_min + (x_pixel - px_left) * scale_x
-    # y_data: Começa no data_y_min e avança com a escala_y, mas o eixo Y dos pixels é invertido
-    # (px_bottom - y_pixel) calcula a distância do pixel atual até o fundo da área de plotagem
-    y_data = data_y_min + (px_bottom - y_pixel) * scale_y
-
-    return x_data, y_data
-
-
-def extract_color_points_hsv(image_np, lower_hsv, upper_hsv):
-    """
-    Extrai pontos de uma imagem com base em um range de cor HSV.
-    Retorna uma array de pontos (y, x) onde a cor foi detectada.
-    """
-    hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
-    mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
-    points = np.column_stack(np.where(mask > 0))  # Retorna (y, x)
-    return points
-
-
-# --- A FUNÇÃO find_graph_plot_area_corners FOI REMOVIDA AQUI ---
-
-
-# --- CONFIGURAÇÃO DA PÁGINA STREAMLIT ---
-st.set_page_config(layout="wide")
-st.title("JLR Torque Integrity Analyser")
-
-# --- BARRA LATERAL (SIDEBAR) ---
-with st.sidebar:
-    st.header("Data viewer")
-    # --- Resumo da aplicação ---
-    st.write(
-        "Faça o upload e a análise de imagens de gráficos de torque e ângulo. "
-        "Serão detectadas as curvas coloridas, convertidas para dados numéricos calibrados "
-        ", fornecidas ferramentas para visualização detalhada e análises consolidadas da variabilidade. "
-        "Ideal para  insights precisos de dados gráficos dos apertos da linha de montagem."
-    )
-    # --- FIM NOVO ---
-    uploaded_files = st.file_uploader("Upload de imagens de gráfico", type=["png", "jpg", "jpeg"],
-                                      accept_multiple_files=True)
-
-    st.subheader("Configuração da Escala Padrão do Gráfico Original")
-    st.info(
-        "Estas são as configurações padrão para novas imagens. Você pode ajustá-las individualmente na seção 'Visualização Detalhada' para cada imagem, se necessário.")
-    x_min_default = st.number_input("Ângulo mínimo padrão (X)", value=-1400.0, format="%.1f", key="x_min_default")
-    x_max_default = st.number_input("Ângulo máximo padrão (X)", value=200.0, format="%.1f", key="x_max_default")
-    y_min_default = st.number_input("Torque mínimo padrão (Y)", value=0.0, format="%.1f", key="y_min_default")
-    y_max_default = st.number_input("Torque máximo padrão (Y)", value=20.0, format="%.1f", key="y_max_default")
-
-# --- DEFINIÇÃO DOS RANGES DE CORES HSV ---
-pink_lower = np.array([140, 50, 100])
-pink_upper = np.array([170, 255, 255])
-blue_lower = np.array([100, 100, 100])
-blue_upper = np.array([130, 255, 255])
-
-# Paleta de cores para os gráficos
-color_palette = list(mcolors.TABLEAU_COLORS.values()) + list(mcolors.CSS4_COLORS.values())
-
-# --- INICIALIZAÇÃO DO SESSION STATE ---
-if 'processed_file_results' not in st.session_state:
-    st.session_state.processed_file_results = []
-if 'selected_file_index' not in st.session_state:
-    st.session_state.selected_file_index = None
-if 'last_uploaded_file_names' not in st.session_state:
-    st.session_state.last_uploaded_file_names = set()
-
-    st.write(
-        "Desenvolvido por: Eng Diógenes Oliveira"
-    )
-
-# --- FUNÇÃO PARA RE-PROCESSAR UMA ÚNICA IMAGEM (PARA CALIBRAÇÃO) ---
-def reprocess_image(index_to_reprocess, x_range_new, y_range_new, plot_area_pixel_corners):
-    """Re-processa uma imagem específica com novos ranges de eixo e atualiza o session_state."""
-
-    current_result = st.session_state.processed_file_results[index_to_reprocess]
-
-    image_pil_raw = current_result['original_image_pil_raw']
-    image_np = np.array(image_pil_raw)
-
-    # Initialize coords lists (defensive programming)
-    pink_coords = []
-    blue_coords = []
-    new_file_specific_curves_data = []
-
-    # Re-extrair pontos coloridos (a detecção de cor não muda, só a conversão para dados)
-    pink_points = extract_color_points_hsv(image_np, pink_lower, pink_upper)
-    blue_points = extract_color_points_hsv(image_np, blue_lower, blue_upper)
-
-    # Utiliza os cantos da área de plotagem que foram detectados ou recalibrados manualmente
-    px_left, px_bottom, px_right, px_top = plot_area_pixel_corners
-
-    # Re-converter para coordenadas de dados usando os NOVOS RANGES e os cantos da área de plotagem
-    pink_coords = [pixel_to_data_coords(x, y, x_range_new, y_range_new, px_left, px_bottom, px_right, px_top)
-                   for y, x in pink_points]
-    blue_coords = [pixel_to_data_coords(x, y, x_range_new, y_range_new, px_left, px_bottom, px_right, px_top)
-                   for y, x in blue_points]
-
-    # Re-criar a figura Plotly para esta imagem
-    new_fig = go.Figure()
-
-    if pink_coords:
-        sorted_coords = sorted([p for p in pink_coords if not np.isnan(p[0])], key=lambda p: p[0])  # Filtra NaNs
-        if sorted_coords:  # Garante que há dados após o filtro
-            x_vals, y_vals = zip(*sorted_coords)
-            new_fig.add_trace(go.Scatter(x=x_vals, y=y_vals, mode='lines+markers',
-                                         name=f'Primeiro estágio ({current_result["file_name"]})',
-                                         marker=dict(color='deeppink', size=3), line=dict(color='deeppink', width=1.5)))
-            new_file_specific_curves_data.append(("Primeiro estágio", current_result["file_name"], x_vals, y_vals))
-
-    if blue_coords:
-        sorted_coords = sorted([p for p in blue_coords if not np.isnan(p[0])], key=lambda p: p[0])  # Filtra NaNs
-        if sorted_coords:  # Garante que há dados após o filtro
-            x_vals, y_vals = zip(*sorted_coords)
-            new_fig.add_trace(go.Scatter(x=x_vals, y=y_vals, mode='lines+markers',
-                                         name=f'Segundo estágio ({current_result["file_name"]})',
-                                         marker=dict(color='royalblue', size=3),
-                                         line=dict(color='royalblue', width=1.5)))
-            new_file_specific_curves_data.append(("Segundo estágio", current_result["file_name"], x_vals, y_vals))
-
-    # Adicionar linhas de referência (no sistema de dados do gráfico)
-    new_fig.add_shape(
-        type="line", x0=0, x1=0, y0=y_range_new[0], y1=y_range_new[1],
-        line=dict(color="red", dash="dash"), xref="x", yref="y"
-    )
-
-
-    new_fig.update_layout(
-        title=f"Gráfico Reconstruído - {current_result['file_name']} (Calibrado com [{x_range_new[0]}:{x_range_new[1]}] / [{y_range_new[0]}:{y_range_new[1]}])",
-        xaxis_title="Ângulo (°)",
-        yaxis_title="Torque (Nm)",
-        hovermode="x unified",
-        showlegend=False,
-        height=500,
-        xaxis_range=[x_range_new[0], x_range_new[1]],
-        yaxis_range=[y_range_new[0], y_range_new[1]]
-    )
-
-    # Prepara a imagem original para exibição com o ponto da origem (canto inferior esquerdo da área de plotagem)
-    display_image_np = image_np.copy()
-    cv2.circle(display_image_np, (px_left, px_bottom), 7, (0, 0, 255), -1)  # Ponto vermelho no canto inferior esquerdo
-    cv2.rectangle(display_image_np, (px_left, px_top), (px_right, px_bottom), (0, 255, 0),
-                  2)  # Desenha retângulo da área de plotagem
-    display_image_pil = Image.fromarray(display_image_np)
-
-    # Atualizar o item específico no session_state
-    st.session_state.processed_file_results[index_to_reprocess].update({
-        "reconstructed_plotly_fig": new_fig,
-        "file_specific_curves_data": new_file_specific_curves_data,
-        "x_range_used": x_range_new,
-        "y_range_used": y_range_new,
-        "plot_area_pixel_corners": plot_area_pixel_corners,  # Armazena os 4 pontos
-        "original_image_pil": display_image_pil
-    })
-    st.rerun()
-
-
-# --- PROCESSAMENTO DAS IMAGENS ENVIADAS ---
-if uploaded_files:
-    current_uploaded_file_names = {f.name for f in uploaded_files}
-
-    if current_uploaded_file_names != st.session_state.last_uploaded_file_names:
-        st.session_state.processed_file_results = []
-        st.session_state.selected_file_index = None
-        st.session_state.last_uploaded_file_names = current_uploaded_file_names
-
-        st.info("Detectei novas imagens. Processando todos os arquivos...")
-
-        for uploaded_file in uploaded_files:
-            # Inicializa as variáveis para garantir que sempre existam no escopo
-            pink_coords = []
-            blue_coords = []
-            file_specific_curves_data = [] # Também inicializa esta lista
-            image_pil_display = None # Para garantir que exista antes do 'try' em caso de erro na abertura
-
-            try:
-                image_pil_raw = Image.open(uploaded_file).convert("RGB")
-                image_np_raw = np.array(image_pil_raw)
-                img_height, img_width = image_np_raw.shape[:2]
-
-                with st.spinner(f"Configurando área de plotagem para {uploaded_file.name}..."):
-                    # Define os cantos da área de plotagem para ser a imagem inteira inicialmente
-                    # px_left, px_top = 0, 0 (canto superior esquerdo da imagem)
-                    # px_right = img_width - 1 (borda direita da imagem)
-                    # px_bottom = img_height - 1 (borda inferior da imagem)
-                    px_left, px_bottom, px_right, px_top = 0, img_height - 1, img_width - 1, 0
-
-                    plot_area_pixel_corners = (px_left, px_bottom, px_right, px_top)
-
-                    st.info(f"A área de plotagem inicial para {uploaded_file.name} foi definida como a imagem inteira. "
-                            "Por favor, ajuste-a manualmente na seção 'Visualização Detalhada' "
-                            "se o gráfico reconstruído não estiver correto.")
-
-                    # Desenha o ponto vermelho e o retângulo da área de plotagem para exibição
-                    image_np_display = image_np_raw.copy()
-                    cv2.circle(image_np_display, (px_left, px_bottom), 7, (0, 0, 255),
-                               -1)  # Ponto vermelho no canto inferior esquerdo
-                    cv2.rectangle(image_np_display, (px_left, px_top), (px_right, px_bottom), (0, 255, 0),
-                                  2)  # Retângulo verde
-                    image_pil_display = Image.fromarray(image_np_display)
-
-                    # Usar os ranges padrão do sidebar para o processamento inicial
-                    x_range_initial = (x_min_default, x_max_default)
-                    y_range_initial = (y_min_default, y_max_default)
-
-                    # --- EXTRAÇÃO E CONVERSÃO DOS PONTOS DA CURVA ---
-                    pink_points = extract_color_points_hsv(image_np_raw, pink_lower, pink_upper)
-                    blue_points = extract_color_points_hsv(image_np_raw, blue_lower, blue_upper)
-
-                    # Usa os cantos da área de plotagem definidos para a conversão pixel -> data
-                    pink_coords = [
-                        pixel_to_data_coords(x, y, x_range_initial, y_range_initial, px_left, px_bottom, px_right,
-                                             px_top)
-                        for y, x in pink_points]
-                    blue_coords = [
-                        pixel_to_data_coords(x, y, x_range_initial, y_range_initial, px_left, px_bottom, px_right,
-                                             px_top)
-                        for y, x in blue_points]
-
-                fig = go.Figure()
-                # file_specific_curves_data já inicializada acima
-
-                if pink_coords:
-                    sorted_coords = sorted([p for p in pink_coords if not np.isnan(p[0])], key=lambda p: p[0])
-                    if sorted_coords:
-                        x_vals, y_vals = zip(*sorted_coords)
-                        fig.add_trace(go.Scatter(x=x_vals, y=y_vals, mode='lines+markers',
-                                                 name=f'Primeiro estágio ({uploaded_file.name})',
-                                                 marker=dict(color='deeppink', size=3),
-                                                 line=dict(color='deeppink', width=1.5)))
-                        file_specific_curves_data.append(("Primeiro estágio", uploaded_file.name, x_vals, y_vals))
-
-                if blue_coords:
-                    sorted_coords = sorted([p for p in blue_coords if not np.isnan(p[0])], key=lambda p: p[0])
-                    if sorted_coords:
-                        x_vals, y_vals = zip(*sorted_coords)
-                        fig.add_trace(go.Scatter(x=x_vals, y=y_vals, mode='lines+markers',
-                                                 name=f'Segundo estágio ({uploaded_file.name})',
-                                                 marker=dict(color='royalblue', size=3),
-                                                 line=dict(color='royalblue', width=1.5)))
-                        file_specific_curves_data.append(("Segundo estágio", uploaded_file.name, x_vals, y_vals))
-
-                # Adicionar linhas de referência (no sistema de dados do gráfico)
-                fig.add_shape(
-                    type="line", x0=0, x1=0, y0=y_range_initial[0], y1=y_range_initial[1],
-                    line=dict(color="red", dash="dash"), xref="x", yref="y"
-                )
-
-
-                fig.update_layout(
-                    title=f"Gráfico Reconstruído - {uploaded_file.name} (Escala Padrão)",
-                    xaxis_title="Ângulo (°)",
-                    yaxis_title="Torque (Nm)",
-                    hovermode="x unified",
-                    showlegend=False,
-                    height=500,
-                    xaxis_range=[x_range_initial[0], x_range_initial[1]],
-                    yaxis_range=[y_range_initial[0], y_range_initial[1]]
-                )
-
-                st.session_state.processed_file_results.append({
-                    "file_name": uploaded_file.name,
-                    "original_image_pil_raw": image_pil_raw,
-                    "original_image_pil": image_pil_display,
-                    "reconstructed_plotly_fig": fig,
-                    "file_specific_curves_data": file_specific_curves_data,
-                    "x_range_used": x_range_initial,
-                    "y_range_used": y_range_initial,
-                    "plot_area_pixel_corners": plot_area_pixel_corners  # Armazena os 4 pontos dos cantos
-                })
-
-            except Exception as e:
-                # Melhoria: Inclui o tipo de erro para melhor depuração
-                st.error(f"Erro ao processar a imagem {uploaded_file.name}: {type(e).__name__}: {e}")
-        st.success("Todas as imagens processadas!")
-
-# --- POPULAR all_curves PARA ANÁLISES COMBINADAS ---
-all_curves = []
-global_color_index = 0
-for result in st.session_state.processed_file_results:
-    for label, fname, x_vals, y_vals in result['file_specific_curves_data']:
-        current_color = color_palette[global_color_index % len(color_palette)]
-        all_curves.append((label, fname, x_vals, y_vals, current_color))
-        global_color_index += 1
-
-# --- DEFINIÇÃO DAS ABAS ---
-tab_visualizacao, tab_analises = st.tabs(["🖼️ Visualização", "📊 Análises"])
-
-with tab_visualizacao:
-    # --- SEÇÃO DE RESUMO DOS GRÁFICOS PROCESSADOS (GRADE DE THUMBNAILS) ---
-    if st.session_state.processed_file_results:
-        st.write("---")
-        st.header("Resumo dos Gráficos Processados")
-        cols_per_row = 3
-
-        grid_container = st.container()
-        with grid_container:
-            num_results = len(st.session_state.processed_file_results)
-
-            for i in range(0, num_results, cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j in range(cols_per_row):
-                    current_index = i + j
-                    if current_index < num_results:
-                        result = st.session_state.processed_file_results[current_index]
-                        with cols[j]:
-                            st.markdown(f"**{result['file_name']}**")
-                            st.image(result['original_image_pil'], width=300)
-                            st.plotly_chart(result['reconstructed_plotly_fig'], width=300, height=300,
-                                            config={'displayModeBar': False})
-
-                            if st.button("Ver Detalhes", key=f"btn_details_{current_index}"):
-                                st.session_state.selected_file_index = current_index
-                                st.rerun()
-
-    # --- SEÇÃO DE VISUALIZAÇÃO DETALHADA (CONDICIONAL) ---
-    if st.session_state.selected_file_index is not None and st.session_state.selected_file_index < len(
-            st.session_state.processed_file_results):
-        st.write("---")
-        st.header("Visualização Detalhada do Gráfico Selecionado")
-
-        selected_result = st.session_state.processed_file_results[st.session_state.selected_file_index]
-
-        st.subheader(f"Detalhes do Arquivo: {selected_result['file_name']}")
-
-        col_img, col_fig = st.columns([1, 2])
-        with col_img:
-            st.image(selected_result['original_image_pil'], use_column_width=True,
-                     caption=f"Imagem Original: {selected_result['file_name']} (Área de Plotagem Configurada)")
-        with col_fig:
-            st.plotly_chart(selected_result['reconstructed_plotly_fig'], use_container_width=True, height=600)
-
-        st.write("---")
-        st.subheader("Ajustar Escala e Área de Plotagem para esta Imagem")
-        st.info(
-            "Altere os valores abaixo para ajustar a área de plotagem na imagem. "
-            "Os cantos do retângulo verde e o ponto vermelho serão atualizados. "
-            "Clique em 'Aplicar Nova Calibração' para ver as mudanças.")
-
-        current_x_min_img = st.number_input("Ângulo mínimo para esta imagem", value=selected_result['x_range_used'][0],
-                                            format="%.1f", key="x_min_img_detail")
-        current_x_max_img = st.number_input("Ângulo máximo para esta imagem", value=selected_result['x_range_used'][1],
-                                            format="%.1f", key="x_max_img_detail")
-        current_y_min_img = st.number_input("Torque mínimo para esta imagem", value=selected_result['y_range_used'][0],
-                                            format="%.1f", key="y_min_img_detail")
-        current_y_max_img = st.number_input("Torque máximo para esta imagem", value=selected_result['y_range_used'][1],
-                                            format="%.1f", key="y_max_img_detail")
-
-        # Campos para recalibrar os cantos da área de plotagem em pixels
-        px_left_detail, px_bottom_detail, px_right_detail, px_top_detail = selected_result['plot_area_pixel_corners']
-
-        st.markdown("**Ajustar Cantos da Área de Plotagem (Pixels):**")
-        col_px1, col_px2 = st.columns(2)
-        with col_px1:
-            new_px_left = st.number_input("Pixel X - Lado Esquerdo", value=int(px_left_detail), format="%d",
-                                          key="px_left_detail")
-            new_px_top = st.number_input("Pixel Y - Lado Superior", value=int(px_top_detail), format="%d",
-                                         key="px_top_detail")
-        with col_px2:
-            new_px_right = st.number_input("Pixel X - Lado Direito", value=int(px_right_detail), format="%d",
-                                           key="px_right_detail")
-            new_px_bottom = st.number_input("Pixel Y - Lado Inferior", value=int(px_bottom_detail), format="%d",
-                                            key="px_bottom_detail")
-
-        # Botão para aplicar a nova calibração
-        if st.button("Aplicar Nova Calibração para esta Imagem"):
-            reprocess_image(st.session_state.selected_file_index,
-                            (current_x_min_img, current_x_max_img),
-                            (current_y_min_img, current_y_max_img),
-                            (new_px_left, new_px_bottom, new_px_right, new_px_top))
-
-        # Botão para esconder a visualização detalhada
-        if st.button("Esconder Detalhes", key="hide_details"):
-            st.session_state.selected_file_index = None
-            st.rerun()
-
-with tab_analises:
-    if all_curves:
-        st.header("Análises Consolidadas de Curvas")
-
-        # 1. Gráfico Combinado de Todas as Curvas
-        st.subheader(" Gráfico Combinado de Todas as Curvas Selecionadas")
-
-        _temp_options = set()
-        for res_data in st.session_state.processed_file_results:
-            file_name = res_data['file_name']
-            x_range_used = res_data['x_range_used']
-            y_range_used = res_data['y_range_used']
-            for curve_info in res_data['file_specific_curves_data']:
-                label = curve_info[0]
-                option_str = f"{label} ({file_name}) (Ângulo: {x_range_used[0]} a {x_range_used[1]}° | Torque: {y_range_used[0]} a {y_range_used[1]} Nm)"
-                _temp_options.add(option_str)
-        selected_curves_options = sorted(list(_temp_options))
-
-        selected_curves = st.multiselect(
-            "Selecione as curvas para exibir no gráfico combinado:",
-            options=selected_curves_options,
-            default=selected_curves_options,
-            key="combined_multiselect"
-        )
-
-        fig_combined = go.Figure()
-        for label, fname, x_vals, y_vals, color in all_curves:
-            original_result = next(
-                (res for res in st.session_state.processed_file_results if res['file_name'] == fname), None)
-            if original_result:
-                full_option_str = f"{label} ({fname}) (Ângulo: {original_result['x_range_used'][0]} a {original_result['x_range_used'][1]}° | Torque: {original_result['y_range_used'][0]} a {original_result['y_range_used'][1]} Nm)"
-                if full_option_str in selected_curves:
-                    fig_combined.add_trace(go.Scatter(
-                        x=x_vals, y=y_vals, mode='lines+markers',
-                        name=f"{label} ({fname})",
-                        marker=dict(color=color, size=3), line=dict(color=color, width=1.5)
-                    ))
-
-        # Linhas de referência x=0 e y=0 no gráfico combinado
-        fig_combined.add_shape(
-            type="line", x0=0, x1=0, y0=y_min_default, y1=y_max_default,
-            line=dict(color="red", dash="dash"), xref="x", yref="y"
-        )
-
-        fig_combined.update_layout(
-            title="Gráfico Combinado de Todas as Curvas Selecionadas",
-            xaxis_title="Ângulo (°)", yaxis_title="Torque (Nm)",
-            showlegend=False,
-            hovermode="x unified",
-            height=500,
-            xaxis_range=[x_min_default, x_max_default],
-            yaxis_range=[y_min_default, y_max_default]
-        )
-        st.plotly_chart(fig_combined, use_container_width=True)
-
-        with st.expander("��️ Diagnóstico: Comportamento Geral das Curvas"):
-            st.markdown("""
-            **Consistência da Trajetória Torque-Ângulo:** A sobreposição das curvas individuais neste gráfico combinado é um indicador crítico da **repetibilidade do processo de aperto**. 
-
-            *   **Alta sobreposição** e linhas bem agrupadas sugerem um processo estável, com baixa variabilidade nas propriedades da junta, no atrito do conjunto e na consistência da ferramenta. Isso é ideal para a confiabilidade do aperto.
-            *   **Dispersão significativa** nas curvas indica instabilidades. Isso pode ser causado por variações na lubrificação, na tolerância dimensional dos componentes, na rigidez da junta, ou na calibração da ferramenta de aperto. Tais inconsistências podem levar a pré-cargas imprevisíveis, afetando diretamente a vida útil da junta e a segurança da aplicação.
-
-            **Relevância para a Restrição de Falhas:** Para mitigar falhas, é fundamental que a transição entre os estágios de aperto e a trajetória geral da curva sejam altamente consistentes. Desvios podem resultar em apertos excessivos (risco de deformação plástica permanente, fadiga precoce do material ou danos ao componente) ou apertos insuficientes (risco de afrouxamento da junta sob vibração ou carga, ou falha por falta de pré-carga). O foco deve ser a minimização da área entre as curvas para garantir uniformidade.
-            """)
-
-        # 2. Gráfico Apenas Primeiro Estágio
-        st.subheader(" Gráfico - Apenas Primeiro Estágio")
-        fig_primeiro = go.Figure()
-        for label, fname, x_vals, y_vals, color in all_curves:
-            if label == "Primeiro estágio":
-                fig_primeiro.add_trace(go.Scatter(
-                    x=x_vals, y=y_vals, mode='lines+markers',
-                    name=f"{label} ({fname})",
-                    marker=dict(color=color, size=3), line=dict(color=color, width=1.5)
-                ))
-        # Linhas de referência x=0 e y=0
-        fig_primeiro.add_shape(
-            type="line", x0=0, x1=0, y0=y_min_default, y1=y_max_default,
-            line=dict(color="red", dash="dash"), xref="x", yref="y"
-        )
-
-        fig_primeiro.update_layout(
-            title="Gráfico - Apenas Primeiro Estágio",
-            xaxis_title="Ângulo (°)", yaxis_title="Torque (Nm)",
-            showlegend=False,
-            hovermode="x unified",
-            height=500,
-            xaxis_range=[x_min_default, x_max_default],
-            yaxis_range=[y_min_default, y_max_default]
-        )
-        st.plotly_chart(fig_primeiro, use_container_width=True)
-
-        # 3. Gráfico Apenas Segundo Estágio
-        st.subheader("📊 Gráfico - Apenas Segundo Estágio")
-        fig_segundo = go.Figure()
-        for label, fname, x_vals, y_vals, color in all_curves:
-            if label == "Segundo estágio":
-                fig_segundo.add_trace(go.Scatter(
-                    x=x_vals, y=y_vals, mode='lines+markers',
-                    name=f"{label} ({fname})",
-                    marker=dict(color=color, size=3), line=dict(color=color, width=1.5)
-                ))
-        # Linhas de referência x=0 e y=0
-        fig_segundo.add_shape(
-            type="line", x0=0, x1=0, y0=y_min_default, y1=y_max_default,
-            line=dict(color="red", dash="dash"), xref="x", yref="y"
-        )
-
-        fig_segundo.update_layout(
-            title="Gráfico - Apenas Segundo Estágio",
-            xaxis_title="Ângulo (°)", yaxis_title="Torque (Nm)",
-            showlegend=False,
-            hovermode="x unified",
-            height=500,
-            xaxis_range=[x_min_default, x_max_default],
-            yaxis_range=[y_min_default, y_max_default]
-        )
-        st.plotly_chart(fig_segundo, use_container_width=True)
-
-        st.write("---")
-        st.subheader("Análise de Tendência e Variação")
-
-        # --- PREPARAÇÃO DOS DADOS PARA ANÁLISE (CURVAS MÉDIAS E ENVELOPE) ---
-        common_x_analysis = np.linspace(x_min_default, x_max_default, 500)
-
-        interpolated_data = {
-            "Primeiro estágio": [],
-            "Segundo estágio": []
-        }
-
-        for label, _, x_vals, y_vals, _ in all_curves:
-            if label in interpolated_data:
-                if len(x_vals) > 1:
-                    try:
-                        sorted_indices = np.argsort(x_vals)
-                        x_vals_sorted = np.array(x_vals)[sorted_indices]
-                        y_vals_sorted = np.array(y_vals)[sorted_indices]
-
-                        # Garantir que x_vals_sorted é único para interp1d
-                        unique_x_sorted, unique_indices = np.unique(x_vals_sorted, return_index=True)
-                        unique_y_sorted = y_vals_sorted[unique_indices]
-
-                        if len(unique_x_sorted) > 1:
-                            f_interp = interp1d(unique_x_sorted, unique_y_sorted, kind='linear', bounds_error=False,
-                                                fill_value=np.nan)
-                            interpolated_y = f_interp(common_x_analysis)
-                            interpolated_data[label].append(interpolated_y)
-                        else:
-                            st.warning(
-                                f"Curva '{label}' de um arquivo tem apenas um ponto X único após pré-processamento. Ignorada na interpolação.")
-                    except ValueError as ve:
-                        st.warning(
-                            f"Não foi possível interpolar a curva {label}. Verifique os dados ou o range. Erro: {ve}")
-                else:
-                    st.warning(
-                        f"Curva '{label}' possui menos de 2 pontos para interpolação e foi ignorada na análise de tendência.")
-
-        mean_curves = {}
-        std_dev_curves = {}
-
-        for stage, data_list in interpolated_data.items():
-            if data_list:
-                stacked_data = np.array(data_list)
-                mean_curves[stage] = np.nanmean(stacked_data, axis=0)
-                std_dev_curves[stage] = np.nanstd(stacked_data, axis=0)
-            else:
-                mean_curves[stage] = np.full_like(common_x_analysis, np.nan)
-                std_dev_curves[stage] = np.full_like(common_x_analysis, np.nan)
-
-        std_factor = st.slider("Fator do Desvio Padrão para o Envelope (e.g., para 1, 2 ou 3-sigma)", min_value=0.5,
-                               max_value=3.0, value=2.0, step=0.1)
-
-        for stage_name in ["Primeiro estágio", "Segundo estágio"]:
-            if not np.all(np.isnan(mean_curves[stage_name])):
-                fig_analysis = go.Figure()
-
-                fig_analysis.add_trace(go.Scatter(
-                    x=common_x_analysis, y=mean_curves[stage_name], mode='lines',
-                    name=f'Média {stage_name}', line=dict(color='black', width=3)
-                ))
-
-                upper_bound = mean_curves[stage_name] + std_factor * std_dev_curves[stage_name]
-                lower_bound = mean_curves[stage_name] - std_factor * std_dev_curves[stage_name]
-
-                fig_analysis.add_trace(go.Scatter(
-                    x=common_x_analysis, y=upper_bound, mode='lines',
-                    line=dict(width=0), showlegend=False, name=f'+/- {std_factor}σ'
-                ))
-                fig_analysis.add_trace(go.Scatter(
-                    x=common_x_analysis, y=lower_bound, mode='lines',
-                    fill='tonexty', fillcolor='rgba(0,100,80,0.2)', line=dict(width=0),
-                    name=f'{std_factor}σ Envelope', showlegend=False
-                ))
-
-                # Linhas de referência x=0 e y=0
-                fig_analysis.add_shape(
-                    type="line", x0=0, x1=0, y0=y_min_default, y1=y_max_default,
-                    line=dict(color="red", dash="dash"), xref="x", yref="y"
-                )
-
-
-                fig_analysis.update_layout(
-                    title=f'Curva Média e Envelope de Variação ({stage_name})',
-                    xaxis_title="Ângulo (°)", yaxis_title="Torque (Nm)",
-                    hovermode="x unified", height=500,
-                    xaxis_range=[x_min_default, x_max_default],
-                    yaxis_range=[y_min_default, y_max_default]
-                )
-                st.plotly_chart(fig_analysis, use_container_width=True)
-
-                with st.expander(f"🛠️ Diagnóstico Avançado: Curva Média e Envelope de Variação ({stage_name})"):
-                    st.markdown("""
-                    ### Interpretação da Curva Média e do Envelope de Variação
-                    A **curva média** (linha preta) representa a trajetória típica e esperada do aperto, ou seja, o "caminho" ideal que o torque percorre em função do ângulo para o seu processo. Desvios significativos dessa forma esperada, como picos ou vales inesperados, ou uma inclinação muito diferente da teórica, podem indicar:
-
-                    *   **Problemas com a Junta:** Variações na geometria da rosca, rugosidade da superfície, ou presença de detritos/lubrificantes não controlados que alteram o atrito de forma não linear.
-                    *   **Comportamento Anômalo da Ferramenta:** Falhas intermitentes no controle do torque ou ângulo pela ferramenta de aperto, ou problemas na sua rigidez mecânica.
-                    *   **Mudanças no Material:** Variações nas propriedades elásticas ou plásticas dos componentes apertados.
-
-                    O **envelope de variação** (área sombreada) é um indicador crítico da **capacidade e estabilidade do processo**. A largura desse envelope, definida pelo fator do desvio padrão (σ), reflete diretamente a dispersão das curvas individuais em torno da média.
-
-                    *   **Envelope Estreito:**
-                        *   **Interpretação:** Indica um processo altamente controlado, repetível e com baixa variabilidade. Isso sugere que os fatores que influenciam o aperto (ferramenta, material, lubrificação, operário, ambiente) estão sob controle estatístico.
-                        *   **Implicação:** Alta confiança de que cada aperto individual se comportará de maneira muito similar à média, resultando em pré-cargas consistentes e menor risco de falhas por sub ou sobre-aperto. Foco deve ser na otimização e busca de melhorias incrementais.
-
-                    *   **Envelope Largo:**
-                        *   **Interpretação:** Sinaliza um processo com alta variabilidade. Existem causas especiais de variação que precisam ser identificadas e eliminadas. Pode ser devido a:
-                            *   **Variações no Coeficiente de Atrito:** Inconsistências na lubrificação ou acabamento superficial dos componentes.
-                            *   **Rigidez da Junta Variável:** Flutuações nas propriedades dos materiais ou na montagem da junta.
-                            *   **Desgaste da Ferramenta:** Ferramentas com desgaste irregular ou que não mantêm a calibração.
-                            *   **Fatores Ambientais:** Variações de temperatura ou umidade que afetam a ferramenta ou os componentes.
-                        *   **Implicação:** Maior probabilidade de apertos fora das especificações, elevando o risco de falhas em campo. A prioridade é a **investigação da causa raiz** e a implementação de ações corretivas para reduzir a variabilidade.
-
-                    **Em resumo, a análise conjunta da forma da curva média e da largura do envelope permite não apenas diagnosticar a presença de problemas, mas também direcionar a investigação para a natureza da falha (sistemática vs. aleatória) e a otimização contínua do processo de aperto.**
-                    """)
-
-                    st.markdown("""
-                    ### Entendendo o Fator do Desvio Padrão para o Envelope (Fator Sigma)
-
-                    O "fator do desvio padrão" que você ajusta no slider determina a amplitude do envelope de variação em torno da curva média. Este fator, geralmente representado por múltiplos de **sigma (σ)**, que é o desvio padrão da distribuição dos dados em cada ponto do ângulo, é uma métrica fundamental na estatística e no Controle Estatístico de Processo (CEP).
-
-                    Assumindo que a distribuição dos valores de torque em cada ponto de ângulo ao longo da curva média se aproxima de uma **distribuição normal (gaussiana)**, os múltiplos de sigma têm um significado probabilístico direto:
-
-                    *   **1-sigma (1σ)**: Se você definir o fator como 1.0, o envelope incluirá aproximadamente **68.27%** de todos os dados de torque para cada ângulo. Isso representa a variabilidade "central" do processo.
-                    *   **2-sigma (2σ)**: Com um fator de 2.0, o envelope se expande para cobrir cerca de **95.45%** dos dados. Este é um nível de confiança comum para capturar a maioria da variabilidade natural de um processo. Qualquer ponto de dados fora desse envelope de 2-sigma já pode ser considerado um "desvio" significativo.
-                    *   **3-sigma (3σ)**: Um fator de 3.0 engloba aproximadamente **99.73%** dos dados. Este é o limite tradicionalmente usado em gráficos de controle de qualidade (como os gráficos de controle de Shewhart) para definir os **Limites de Controle Naturais (LCN)** do processo. Se um ponto de dados cai fora dos limites de 3-sigma, é um forte indicativo da presença de uma **causa especial de variação**, ou seja, algo incomum aconteceu que merece investigação imediata, e não é apenas parte da variabilidade aleatória do processo.
-
-                    **Impacto na Análise:**
-
-                    A escolha do fator sigma para o envelope impacta diretamente sua percepção da estabilidade do processo:
-
-                    *   Um **fator menor** (e.g., 1-sigma) tornará o envelope mais estreito, e mais curvas individuais podem parecer "fora" ou "marginais", mesmo que façam parte da variação normal. Isso pode levar a **falsos alarmes** e investigações desnecessárias.
-                    *   Um **fator maior** (e.g., 3-sigma) criará um envelope mais amplo, que capturará quase toda a variabilidade natural do processo. Pontos que caem fora desse envelope são verdadeiramente anomalias e sinalizam problemas sérios no processo, requerendo **ação corretiva**.
-
-                    Para um diagnóstico eficaz na engenharia de processos, o uso de 2-sigma ou 3-sigma é geralmente recomendado, pois eles fornecem um bom equilíbrio entre a sensibilidade para detectar desvios e a robustez contra falsos alarmes, auxiliando Diógenes na identificação de quando o processo está "fora de controle estatístico" e precisa de atenção.
-                    """)
-            else:
-                st.info(f"Dados insuficientes para gerar a análise de curva média para '{stage_name}'.")
-
-        # --- NOVOS GRÁFICOS DE VARIABILIDADE ---
-        # Coletar dados para os novos gráficos
-        max_torques_per_curve = []
-        max_angles_per_curve = []
-
-        for i, result in enumerate(st.session_state.processed_file_results):
-            for label, fname, x_vals, y_vals in result['file_specific_curves_data']:
-                if x_vals and y_vals:  # Garantir que há pontos
-                    max_torques_per_curve.append({
-                        "image_idx": i + 1,  # Índice baseado em 1 para o eixo X
-                        "max_value": np.max(y_vals),
-                        "curve_label": label,
-                        "file_name": fname
-                    })
-                    max_angles_per_curve.append({
-                        "image_idx": i + 1,
-                        "max_value": np.max(x_vals),
-                        "curve_label": label,
-                        "file_name": fname
-                    })
-
-        # Gráfico de Variabilidade do Torque Máximo
-        st.write("---")
-        st.subheader(" Variabilidade do Torque Máximo por Imagem")
-        fig_max_torque = go.Figure()
-
-        max_torque_first_stage = [d for d in max_torques_per_curve if d["curve_label"] == "Primeiro estágio"]
-        if max_torque_first_stage:
-            fig_max_torque.add_trace(go.Scatter(
-                x=[d["image_idx"] for d in max_torque_first_stage],
-                y=[d["max_value"] for d in max_torque_first_stage],
-                mode='lines+markers',
-                name='Primeiro Estágio',
-                marker=dict(color='deeppink', size=6),
-                line=dict(width=2)
-            ))
-
-        max_torque_second_stage = [d for d in max_torques_per_curve if d["curve_label"] == "Segundo estágio"]
-        if max_torque_second_stage:
-            fig_max_torque.add_trace(go.Scatter(
-                x=[d["image_idx"] for d in max_torque_second_stage],
-                y=[d["max_value"] for d in max_torque_second_stage],
-                mode='lines+markers',
-                name='Segundo Estágio',
-                marker=dict(color='royalblue', size=6),
-                line=dict(width=2)
-            ))
-
-        fig_max_torque.update_layout(
-            title="Torque Máximo Registrado por Imagem (Primeiro e Segundo Estágio)",
-            xaxis_title="Número da Imagem",
-            yaxis_title="Torque Máximo (Nm)",
-            hovermode="x unified",
-            height=500,
-            xaxis_tickmode='array',  # Forçar ticks inteiros
-            xaxis_tickvals=list(range(1, len(st.session_state.processed_file_results) + 1)) if len(
-                st.session_state.processed_file_results) > 0 else [],
-            yaxis_range=[y_min_default, y_max_default]  # Mantém o range do torque consistente
-        )
-        st.plotly_chart(fig_max_torque, use_container_width=True)
-
-        with st.expander("🛠️ Diagnóstico: Estabilidade do Torque Máximo por Imagem"):
-            st.markdown("""
-            **Estabilidade do Torque Final:** Este gráfico oferece uma visão temporal da estabilidade do pico de torque atingido por cada aperto, considerando todas as imagens carregadas. É uma ferramenta essencial para monitorar a consistência do processo ao longo de múltiplos ciclos de aperto.
-
-            *   **Flutuações acentuadas** entre imagens consecutivas podem sinalizar problemas como:
-                *   **Degradação intermitente da ferramenta de aperto:** Desgaste irregular ou superaquecimento.
-                *   **Variações significativas nas propriedades do material:** Lotes diferentes de fixações ou componentes com coeficientes de atrito inconsistentes.
-                *   **Inconsistências no posicionamento do componente ou na sequência de aperto:** Introdução de desalinhamentos ou pré-cargas errôneas.
-                *   **Acúmulo de contaminantes:** Presença de óleo, sujeira ou detritos nas roscas que alteram o atrito.
-            *   A identificação de **tendências** (ascendentes ou descendentes) é vital, pois pode indicar desgaste progressivo da ferramenta, calibração inadequada ou um problema sistêmico que está evoluindo com o tempo.
-
-            **Relevância para a Restrição de Falhas:** A otimização para um torque máximo consistente e dentro das especificações é um pré-requisito para o controle eficaz do ângulo de aperto e, consequentemente, para a prevenção de falhas. Um torque final muito baixo leva a uma pré-carga insuficiente e risco de afrouxamento; um torque muito alto pode causar deformação plástica da rosca, fadiga ou quebra do parafuso/componente. A minimização da variabilidade neste parâmetro contribui diretamente para a durabilidade e segurança do conjunto.
-            """)
-
-        # Gráfico de Variabilidade do Ângulo Máximo
-        st.write("---")
-        st.subheader(" Variabilidade do Ângulo Máximo por Imagem")
-        fig_max_angle = go.Figure()
-
-        max_angle_first_stage = [d for d in max_angles_per_curve if d["curve_label"] == "Primeiro estágio"]
-        if max_angle_first_stage:
-            fig_max_angle.add_trace(go.Scatter(
-                x=[d["image_idx"] for d in max_angle_first_stage],
-                y=[d["max_value"] for d in max_angle_first_stage],
-                mode='lines+markers',
-                name='Primeiro Estágio',
-                marker=dict(color='deeppink', size=6),
-                line=dict(width=2)
-            ))
-
-        max_angle_second_stage = [d for d in max_angles_per_curve if d["curve_label"] == "Segundo estágio"]
-        if max_angle_second_stage:
-            fig_max_angle.add_trace(go.Scatter(
-                x=[d["image_idx"] for d in max_angle_second_stage],
-                y=[d["max_value"] for d in max_angle_second_stage],
-                mode='lines+markers',
-                name='Segundo Estágio',
-                marker=dict(color='royalblue', size=6),
-                line=dict(width=2)
-            ))
-
-        fig_max_angle.update_layout(
-            title="Ângulo Máximo Registrado por Imagem (Primeiro e Segundo Estágio)",
-            xaxis_title="Número da Imagem",
-            yaxis_title="Ângulo Máximo (°)",
-            hovermode="x unified",
-            height=500,
-            xaxis_tickmode='array',  # Forçar ticks inteiros
-            xaxis_tickvals=list(range(1, len(st.session_state.processed_file_results) + 1)) if len(
-                st.session_state.processed_file_results) > 0 else [],
-            yaxis_range=[x_min_default, x_max_default]  # Mantém o range do ângulo consistente (usando os valores de X)
-        )
-        st.plotly_chart(fig_max_angle, use_container_width=True)
-
-        with st.expander("🛠️ Diagnóstico: Controle do Ângulo Final – Chave para Prevenção de Falhas"):
-            st.markdown("""
-            **Controle do Ângulo Final – Chave para Prevenção de Falhas:** Este gráfico é **diretamente alinhado** com o objetivo principal de restringir falhas através da otimização e potencial redução do ângulo final de aperto. A variabilidade no ângulo máximo (o ponto de parada do processo de aperto angular ou de torque-ângulo) é um indicador crítico da precisão e consistência do controle angular do seu processo.
-
-            *   **Grandes variações** no ângulo máximo entre os apertos podem resultar em:
-                *   **Aperto Excessivo:** Se o ângulo é consistentemente muito alto, pode levar a uma deformação plástica indesejada da junta ou do elemento de fixação, resultando em fadiga precoce do material ou até mesmo falha imediata por ruptura. Isso é particularmente problemático em aplicações onde a integridade estrutural e a resiliência a ciclos de carga são cruciais.
-                *   **Aperto Insuficiente:** Se o ângulo é muito baixo para o torque ou carga axial desejados, pode levar a pré-cargas inadequadas, resultando em afrouxamento da junta sob vibração ou carga dinâmica. Isso compromete a estabilidade do conjunto e pode levar a falhas de componentes interligados.
-
-            **Para otimizar e reduzir o ângulo final de aperto**, é imperativo que a dispersão neste gráfico seja minimizada. Isso pode exigir uma investigação aprofundada de:
-            *   **Ajustes na lógica de controle da ferramenta:** Refinamento dos parâmetros de controle PID ou algoritmos de parada.
-            *   **Inspeção de folgas no sistema de fixação:** Eliminação de movimentos indesejados antes do início do aperto efetivo.
-            *   **Reavaliação da rigidez da junta:** Variações na compressibilidade da junta podem levar a diferentes ângulos para o mesmo torque.
-            *   **Compensação de atrito:** Implementação de estratégias para mitigar a influência do atrito variável.
-
-            A capacidade de atingir consistentemente um ângulo máximo menor, mantendo os requisitos de torque e pré-carga dentro dos limites de engenharia, é um diferencial significativo para a **robustez e longevidade do conjunto**. Este gráfico serve como um KPI (Key Performance Indicator) fundamental para a engenharia de processo, sinalizando quando e onde intervenções são necessárias para alcançar um controle de aperto de alta precisão.
-            """)
-
-        st.write("---")
-        st.subheader("Distribuição de Métricas Chave para Diagnóstico")
-
-        stats_data_for_plots = []
-        for label, fname, x_vals, y_vals, _ in all_curves:
-            if len(x_vals) > 0 and len(y_vals) > 0:
-                stats_data_for_plots.append({
-                    "Curva": f"{label} ({fname})",
-                    "Estágio": label,
-                    "Torque Máximo": np.max(y_vals),
-                    "Ângulo Mínimo": np.min(x_vals),
-                    "Ângulo Máximo": np.max(x_vals)
-                })
-        df_stats_for_plots = pd.DataFrame(stats_data_for_plots)
-
-        if not df_stats_for_plots.empty:
-            metrics = ["Torque Máximo", "Ângulo Mínimo", "Ângulo Máximo"]
-            for metric in metrics:
-                fig_box = go.Figure()
-
-                for stage in df_stats_for_plots['Estágio'].unique():
-                    stage_data = df_stats_for_plots[df_stats_for_plots['Estágio'] == stage]
-                    fig_box.add_trace(go.Box(
-                        y=stage_data[metric],
-                        name=stage,
-                        boxpoints='all',
-                        jitter=0.3,
-                        pointpos=-1.8
-                    ))
-
-                fig_box.update_layout(
-                    title=f'Distribuição de {metric} por Estágio',
-                    yaxis_title=metric,
-                    height=500,
-                    showlegend=False,
-                    yaxis_range=[y_min_default if "Torque" in metric else x_min_default if "Ângulo" in metric else None,
-                                 y_max_default if "Torque" in metric else x_max_default if "Ângulo" in metric else None]
-                )
-                st.plotly_chart(fig_box, use_container_width=True)
-
-                with st.expander(f"🛠️ Diagnóstico: Distribuição Estatística de {metric}"):
-                    if "Torque" in metric:
-                        st.markdown(f"""
-                        **Robustez da Distribuição do {metric}:** Os box plots oferecem uma análise estatística visual da dispersão do {metric} para cada estágio de aperto.
-                        *   **Caixas compactas** com bigodes curtos indicam um processo altamente repetitivo e controlado, com baixa variabilidade. Isso se traduz em maior confiança na pré-carga final da junta.
-                        *   **Caixas alongadas ou assimétricas** sinalizam maior variabilidade ou tendências específicas (e.g., um "rabo" longo para torques mais altos ou mais baixos). Isso exige investigação da causa raiz, como flutuações na ferramenta, material ou condições da junta.
-                        *   A presença de **"outliers"** (pontos isolados fora dos bigodes) para o {metric} sinaliza eventos anômalos que requerem investigação imediata – estes são os apertos mais propensos a falhas, seja por sub-aperto crítico ou sobre-aperto destrutivo.
-
-                        **Relevância para a Prevenção de Falhas:** Uma distribuição bem controlada do torque máximo garante que a pré-carga da junta esteja consistentemente dentro dos limites de engenharia, prevenindo tanto o afrouxamento quanto a falha por excesso de estresse.
-                        """)
-                    elif "Ângulo" in metric:
-                        st.markdown(f"""
-                        **Robustez da Distribuição do {metric}:** Os box plots são cruciais para entender a variabilidade do {metric}, especialmente o 'Ângulo Máximo', que é vital para o controle da pré-carga e para evitar falhas.
-                        *   **Caixas compactas** com bigodes curtos demonstram um processo de controle angular de alta precisão. Uma menor dispersão do ângulo máximo indica que a ferramenta de aperto está atingindo consistentemente o ponto final desejado, o que é fundamental para a durabilidade da junta.
-                        *   **Caixas alongadas ou a presença de outliers** para o {metric} indicam instabilidade no controle angular. Isso pode resultar em:
-                            *   **Ângulos finais excessivos:** Risco de deformação permanente, fadiga ou mesmo ruptura dos componentes, especialmente em juntas sensíveis à compressão.
-                            *   **Ângulos finais insuficientes:** Implicando em pré-cargas abaixo do ideal, o que pode levar ao afrouxamento da junta sob vibração ou carga dinâmica.
-
-                        **Foco na Redução de Ângulo para Restringir Falhas:** Um foco especial deve ser dado à distribuição do 'Ângulo Máximo'. Uma distribuição concentrada e com valores médios/medianos mais baixos (desde que o torque necessário seja atingido e a pré-carga mínima seja garantida) demonstra progresso no objetivo de reduzir o ângulo final. Se a caixa for alongada ou assimétrica, indica que o processo de controle do ângulo precisa de ajustes para maior uniformidade e precisão, o que é fundamental para evitar a fadiga por excesso de aperto ou falhas por falta de aperto. A estabilidade no ângulo de início e fim da curva de aperto reflete diretamente na previsibilidade da pré-carga.
-                        """)
+import plotly.express as px
+import plotly.graph_objects as go
+from scipy import stats
+import numpy as np  # Necessário para cálculos com a curva normal
+
+# --- Configuração da Página ---
+st.set_page_config(layout="wide", page_title="JLR - Análise de Janela de Aperto", initial_sidebar_state="expanded")
+
+
+# --- Funções Auxiliares ---
+def calculate_cp_cpk(data_series, usl, lsl):
+    """Calculates Cp and Cpk for a given data series and specification limits."""
+    mean = data_series.mean()
+    std_dev = data_series.std()  # Corrigido: era data_series.S_t.d()
+
+    if std_dev == 0:
+        # If std_dev is 0, all data points are identical.
+        # If mean is within [lsl, usl], capability is theoretically infinite.
+        # Otherwise, it's 0 (not capable).
+        if lsl <= mean <= usl:
+            return float('inf'), float('inf')  # Perfect capability
         else:
-            st.info("Dados insuficientes para gerar gráficos de distribuição de métricas.")
+            return 0.0, 0.0  # Not capable, all points outside limits
 
-        st.write("---")
-        st.subheader("Análises Estatísticas por Curva (Tabela)")
-        stats_data = []
-        torque_max_global = []
-        angle_min_global = []
-        angle_max_global = []
-
-        for label, fname, x_vals, y_vals, color in all_curves:
-            if len(x_vals) > 0 and len(y_vals) > 0:
-                torque_max_global.append(np.max(y_vals))
-                angle_min_global.append(np.min(x_vals))
-                angle_max_global.append(np.max(x_vals))
-
-                stats_data.append({
-                    "Curva": f"{label} ({fname})",
-                    "Torque Máximo (Nm)": f"{np.max(y_vals):.2f}",
-                    "Ângulo Mínimo (°)": f"{np.min(x_vals):.2f}",
-                    "Ângulo Máximo (°)": f"{np.max(x_vals):.2f}",
-                    "Torque Médio (Nm)": f"{np.mean(y_vals):.2f}",
-                    "Desvio Padrão Torque (Nm)": f"{np.std(y_vals):.2f}"
-                })
-            else:
-                stats_data.append({
-                    "Curva": f"{label} ({fname})",
-                    "Torque Máximo (Nm)": "N/A",
-                    "Ângulo Mínimo (°)": "N/A",
-                    "Ângulo Máximo (°)": "N/A",
-                    "Torque Médio (Nm)": "N/A",
-                    "Desvio Padrão Torque (Nm)": "N/A"
-                })
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Torque Máximo Global", f"{np.max(torque_max_global):.2f} Nm" if torque_max_global else "N/A")
-        with col2:
-            st.metric("Ângulo Mínimo Global", f"{np.min(angle_min_global):.2f} °" if angle_min_global else "N/A")
-        with col3:
-            st.metric("Ângulo Máximo Global", f"{np.max(angle_max_global):.2f} °" if angle_max_global else "N/A")
-
-        df_stats = pd.DataFrame(stats_data)
-        st.dataframe(df_stats, use_container_width=True)
-
-        if not df_stats.empty:
-            csv = df_stats.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Baixar Estatísticas (CSV)",
-                data=csv,
-                file_name='estatisticas_torque_angulo.csv',
-                mime='text/csv',
-            )
+    # Cp calculation
+    # Ensure USL > LSL to avoid division by zero or negative range for Cp
+    if usl <= lsl:
+        cp = 0.0  # Or raise an error, or indicate invalid specs
     else:
+        cp = (usl - lsl) / (6 * std_dev)
+
+    # Cpk calculation
+    cpu = (usl - mean) / (3 * std_dev)
+    cpl = (mean - lsl) / (3 * std_dev)
+    cpk = min(cpu, cpl)
+
+    return cp, cpk
+
+
+def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang):
+    """Generates an intelligent text analysis based on Cp and Cpk values."""
+    analysis_text = []
+
+    # --- Analysis for Torque ---
+    analysis_text.append("### Análise de Capacidade para Torque (Nm):")
+    if cpk_tq == float('inf'):
+        analysis_text.append(
+            "O processo para **Torque** demonstra **capacidade perfeita** (Cp = Cpk = Infinito). Isso indica que, para os dados 'OK' filtrados, a variação é praticamente nula, e todos os valores estão exatamente dentro dos limites de especificação. É um cenário ideal de controle.")
+    elif cpk_tq < 1.0:
+        analysis_text.append(
+            f"O processo para **Torque** apresenta **capacidade insuficiente (Cpk = {cpk_tq:.2f} < 1.0)** em relação aos limites propostos. Isso significa que a variação do processo é muito grande ou o processo não está bem centralizado dentro das especificações.")
+        if cp_tq < 1.0:
+            analysis_text.append(
+                f"  - **Potencial (Cp={cp_tq:.2f}):** A variação do processo é maior que a tolerância dos limites, indicando um problema fundamental com a dispersão.")
+        else:
+            analysis_text.append(
+                f"  - **Potencial (Cp={cp_tq:.2f}):** Embora a variação potencial seja aceitável, o processo está descentralizado, o que compromete a capacidade real.")
+        analysis_text.append("**Requer atenção e ação imediata.**")
+    elif 1.0 <= cpk_tq < 1.33:
+        analysis_text.append(
+            f"O processo para **Torque** é **marginalmente capaz (Cpk = {cpk_tq:.2f})**. Embora esteja tecnicamente dentro da capacidade, há espaço para melhoria para torná-lo mais robusto.")
+        if cp_tq - cpk_tq > 0.1:  # Significant difference indicates centering issue
+            analysis_text.append(
+                f"  - A diferença entre Cp ({cp_tq:.2f}) e Cpk ({cpk_tq:.2f}) sugere um ligeiro problema de centralização, que deve ser investigado.")
+        else:
+            analysis_text.append(f"  - O processo está razoavelmente bem centralizado para sua variabilidade atual.")
+        analysis_text.append("Recomenda-se monitoramento atento e esforços de otimização.")
+    elif 1.33 <= cpk_tq < 1.67:
+        analysis_text.append(
+            f"O processo para **Torque** demonstra **boa capacidade (Cpk = {cpk_tq:.2f})**. É considerado adequado para a maioria das aplicações, indicando que o processo é estável e centrado.")
+        if cp_tq - cpk_tq > 0.1:  # Significant difference indicates centering issue
+            analysis_text.append(
+                f"  - Uma pequena diferença entre Cp ({cp_tq:.2f}) e Cpk ({cpk_tq:.2f}) sugere que, embora capaz, há uma oportunidade para um centramento ainda melhor.")
+    else:  # cpk_tq >= 1.67
+        analysis_text.append(
+            f"O processo para **Torque** é **altamente capaz (Cpk = {cpk_tq:.2f})**. Isso indica um processo muito robusto, com baixa probabilidade de produzir itens fora das especificações, ideal para aplicações Six Sigma.")
+        if cp_tq - cpk_tq > 0.1:  # Significant difference indicates centering issue
+            analysis_text.append(
+                f"  - Apesar da alta capacidade, uma diferença entre Cp ({cp_tq:.2f}) e Cpk ({cpk_tq:.2f}) pode indicar uma pequena oportunidade de otimização no centramento.")
+
+    analysis_text.append("")  # Empty line for spacing
+
+    # --- Analysis for Angle ---
+    analysis_text.append("### Análise de Capacidade para Ângulo (°):")
+    if cpk_ang == float('inf'):
+        analysis_text.append(
+            "O processo para **Ângulo** demonstra **capacidade perfeita** (Cp = Cpk = Infinito). Isso indica que, para os dados 'OK' filtrados, a variação é praticamente nula, e todos os valores estão exatamente dentro dos limites de especificação. É um cenário ideal de controle.")
+    elif cpk_ang < 1.0:
+        analysis_text.append(
+            f"O processo para **Ângulo** apresenta **capacidade insuficiente (Cpk = {cpk_ang:.2f} < 1.0)** em relação aos limites propostos. Isso significa que a variação do processo é muito grande ou o processo não está bem centralizado dentro das especificações.")
+        if cp_ang < 1.0:
+            analysis_text.append(
+                f"  - **Potencial (Cp={cp_ang:.2f}):** A variação do processo é maior que a tolerância dos limites, indicando um problema fundamental com a dispersão.")
+        else:
+            analysis_text.append(
+                f"  - **Potencial (Cp={cp_ang:.2f}):** Embora a variação potencial seja aceitável, o processo está descentralizado, o que compromete a capacidade real.")
+        analysis_text.append("**Requer atenção e ação imediata.**")
+    elif 1.0 <= cpk_ang < 1.33:
+        analysis_text.append(
+            f"O processo para **Ângulo** é **marginalmente capaz (Cpk = {cpk_ang:.2f})**. Embora esteja tecnicamente dentro da capacidade, há espaço para melhoria para torná-lo mais robusto.")
+        if cp_ang - cpk_ang > 0.1:  # Significant difference indicates centering issue
+            analysis_text.append(
+                f"  - A diferença entre Cp ({cp_ang:.2f}) e Cpk ({cpk_ang:.2f}) sugere um ligeiro problema de centralização, que deve ser investigado.")
+        else:
+            analysis_text.append(f"  - O processo está razoavelmente bem centralizado para sua variabilidade atual.")
+        analysis_text.append("Recomenda-se monitoramento atento e esforços de otimização.")
+    elif 1.33 <= cpk_ang < 1.67:
+        analysis_text.append(
+            f"O processo para **Ângulo** demonstra **boa capacidade (Cpk = {cpk_ang:.2f})**. É considerado adequado para a maioria das aplicações, indicando que o processo é estável e centrado.")
+        if cp_ang - cpk_ang > 0.1:  # Significant difference indicates centering issue
+            analysis_text.append(
+                f"  - Uma pequena diferença entre Cp ({cp_ang:.2f}) e Cpk ({cpk_ang:.2f}) sugere que, embora capaz, há uma oportunidade para um centramento ainda melhor.")
+    else:  # cpk_ang >= 1.67
+        analysis_text.append(
+            f"O processo para **Ângulo** é **altamente capaz (Cpk = {cpk_ang:.2f})**. Isso indica um processo muito robusto, com baixa probabilidade de produzir itens fora das especificações, ideal para aplicações Six Sigma.")
+        if cp_ang - cpk_ang > 0.1:  # Significant difference indicates centering issue
+            analysis_text.append(
+                f"  - Apesar da alta capacidade, uma diferença entre Cp ({cp_ang:.2f}) e Cpk ({cpk_ang:.2f}) pode indicar uma pequena oportunidade de otimização no centramento.")
+
+    analysis_text.append("")  # Empty line for spacing
+
+    # --- Overall Summary ---
+    overall_status = []
+    if (cpk_tq == float('inf') or (cpk_tq is not None and cpk_tq >= 1.67)) and (
+            cpk_ang == float('inf') or (cpk_ang is not None and cpk_ang >= 1.67)):
+        overall_status.append(
+            "ambos os parâmetros demonstram **alta ou perfeita capacidade**, indicando um processo muito robusto e confiável.")
+    elif (cpk_tq is not None and cpk_tq < 1.0) or (cpk_ang is not None and cpk_ang < 1.0):
+        overall_status.append(
+            "apresenta **capacidade insuficiente** em um ou ambos os parâmetros, o que requer **ação imediata** para investigar e corrigir as causas de variabilidade ou descentralização.")
+    elif (cpk_tq is not None and 1.0 <= cpk_tq < 1.33) or (cpk_ang is not None and 1.0 <= cpk_ang < 1.33):
+        overall_status.append(
+            "demonstra **capacidade marginal** em um ou ambos os parâmetros. Isso significa que, embora o processo seja tecnicamente capaz, há **oportunidades significativas de melhoria** para torná-lo mais estável e centralizado, evitando futuras não-conformidades.")
+    elif (cpk_tq is not None and cpk_tq >= 1.33 and cpk_ang is not None and cpk_ang >= 1.33):
+        overall_status.append("é **capaz** para ambos os parâmetros, com bom desempenho e estabilidade.")
+    else:
+        # Fallback for mixed or complex scenarios not explicitly covered above or if Cpk is None
+        overall_status.append(
+            "requer uma análise detalhada para entender as combinações de capacidade entre Torque e Ângulo.")
+
+    analysis_text.append(
+        f"No geral, a capacidade do processo para os parâmetros de Torque e Ângulo {overall_status[0]}.")
+    analysis_text.append(
+        "É fundamental monitorar continuamente esses índices, especialmente o Cpk, para garantir a estabilidade e a centralização do processo dentro dos novos limites definidos. Um Cpk abaixo de 1.33 geralmente indica necessidade de ação para melhoria do processo.")
+
+    return "\n".join(analysis_text)
+
+
+# --- Título da Aplicação ---
+st.title("🔩 Análise e Otimização da Janela de Aperto Automotivo")
+with st.expander("💡 Entendimento da Aplicação"):
+    st.markdown("""
+    Esta aplicação permite carregar dados de aperto, visualizar a relação entre torque e ângulo,
+    e aplicar metodologias estatísticas e manuais para propor uma **nova e mais precisa 'janela de aperto'**,
+    visando aumentar a precisão do controle de qualidade e reduzir a possibilidade de erro do operador.
+    """)
+
+# --- 0. Inicialização do Session State para Compartilhamento de Dados ---
+# Isso é crucial para que o DataFrame filtrado esteja disponível entre as abas.
+if 'df' not in st.session_state:
+    st.session_state.df = None
+if 'df_filtered' not in st.session_state:
+    st.session_state.df_filtered = None
+if 'current_tq_min' not in st.session_state:
+    st.session_state.current_tq_min = 0
+if 'current_tq_max' not in st.session_state:
+    st.session_state.current_tq_max = 0
+if 'current_ang_min' not in st.session_state:
+    st.session_state.current_ang_min = 0
+if 'current_ang_max' not in st.session_state:
+    st.session_state.current_ang_max = 0
+
+# --- Upload de Arquivo ---
+st.header("1. Carregar Dados de Aperto")
+uploaded_file = st.file_uploader("Arraste e solte seu arquivo CSV aqui", type=["csv"])
+
+if uploaded_file is not None:
+    try:
+        # Carregar e pré-processar o DataFrame
+        df_loaded = pd.read_csv(uploaded_file, encoding='latin-1')
+
+        required_columns = [
+            'TQ_rea', 'TQmín_nom', 'TQmáx_nom',
+            'ÂNG_rea', 'ÂNGmín', 'ÂNGmáx_nom',
+            'Avaliação', 'GP', 'Ferramenta'
+        ]
+        if not all(col in df_loaded.columns for col in required_columns):
+            st.error(f"O CSV deve conter as seguintes colunas: {', '.join(required_columns)}")
+            st.stop()
+
+        for col in ['TQ_rea', 'TQmín_nom', 'TQmáx_nom', 'ÂNG_rea', 'ÂNGmín', 'ÂNGmáx_nom']:
+            if df_loaded[col].dtype == 'object':
+                df_loaded[col] = df_loaded[col].str.replace(',', '.').astype(float)
+
+        st.session_state.df = df_loaded.copy()  # Armazena o DataFrame original no session state
+        st.success("Arquivo CSV carregado com sucesso!")
+
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao processar o arquivo: {e}")
         st.info(
-            "Nenhuma curva processada para análise. Por favor, faça o upload e processamento de imagens na aba 'Visualização'.")
+            "Por favor, verifique se o arquivo é um CSV válido, se as colunas estão corretas e tente uma codificação diferente (ex: 'windows-1252' ou 'utf-8').")
+        st.exception(e)
+        st.session_state.df = None  # Reseta o df em caso de erro
+
+if st.session_state.df is None:
+    st.info("Aguardando o upload de um arquivo CSV.")
+    st.stop()  # Interrompe a execução se não houver arquivo carregado
+
+# --- Sidebar de Filtros (aplicada ao df carregado) ---
+st.sidebar.header("Filtros de Análise")
+
+# Filtros que atuam sobre st.session_state.df
+opcoes_avaliacao = ['Todos'] + sorted(st.session_state.df['Avaliação'].unique().tolist())
+avaliacao_selecionada = st.sidebar.selectbox("Filtrar por Avaliação:", opcoes_avaliacao)
+
+grupamentos_unicos = ['Todos'] + sorted(st.session_state.df['GP'].unique().tolist())
+gp_selecionado = st.sidebar.selectbox("Filtrar por Grupamento (GP):", grupamentos_unicos)
+
+ferramentas_unicas = ['Todas'] + sorted(st.session_state.df['Ferramenta'].unique().tolist())
+ferramenta_selecionada = st.sidebar.selectbox("Filtrar por Ferramenta:", ferramentas_unicas)
+
+# Cria o df_filtered com base nos filtros da sidebar
+df_temp_filtered = st.session_state.df.copy()
+if avaliacao_selecionada != 'Todos':
+    df_temp_filtered = df_temp_filtered[df_temp_filtered['Avaliação'] == avaliacao_selecionada]
+if gp_selecionado != 'Todos':
+    df_temp_filtered = df_temp_filtered[df_temp_filtered['GP'] == gp_selecionado]
+if ferramenta_selecionada != 'Todas':
+    df_temp_filtered = df_temp_filtered[df_temp_filtered['Ferramenta'] == ferramenta_selecionada]
+
+st.session_state.df_filtered = df_temp_filtered.copy()
+
+if st.session_state.df_filtered.empty:
+    st.warning("Nenhum dado encontrado com os filtros selecionados. Por favor, ajuste seus filtros.")
+    st.stop()
+
+# Calcular os limites globais da janela de aperto nominal a partir dos dados FILTRADOS e armazenar no session_state
+st.session_state.current_tq_min = st.session_state.df_filtered['TQmín_nom'].min()
+st.session_state.current_tq_max = st.session_state.df_filtered['TQmáx_nom'].max()
+st.session_state.current_ang_min = st.session_state.df_filtered['ÂNGmín'].min()
+st.session_state.current_ang_max = st.session_state.df_filtered['ÂNGmáx_nom'].max()
+
+# --- ABAS DE NAVEGAÇÃO ---
+tab1, tab2 = st.tabs(["Otimização por Percentis", "Definição Manual da Janela"])
+
+with tab1:
+    st.header("Análise Detalhada: Otimização por Percentis")
+
+    # --- EXIBIÇÃO DO DATAFRAME FILTRADO ---
+    st.subheader("Primeiras linhas do DataFrame com filtros aplicados:")
+    st.dataframe(st.session_state.df_filtered.head())
+
+    # --- TEXTO: INTERVALO NOMINAL ATUAL PARA OS DADOS FILTRADOS ---
+    with st.expander("ℹ️ Intervalo Nominal Atual (Detalhes)"):
+        st.info(f"""
+        Para os dados atualmente filtrados (Grupamento: **{gp_selecionado}**, Ferramenta: **{ferramenta_selecionada}**, Avaliação: **{avaliacao_selecionada}**),
+        os limites nominais atuais (originais do seu CSV) são:
+        - **Torque (TQ):** de `{st.session_state.current_tq_min:.3f} Nm` a `{st.session_state.current_tq_max:.3f} Nm`
+        - **Ângulo (ÂNG):** de `{st.session_state.current_ang_min:.3f}°` a `{st.session_state.current_ang_max:.3f}°`
+        """)
+
+    # --- 2. Visualização da Janela de Aperto Atual ---
+    st.header("2. Visualização da Janela de Aperto Atual e Pontos Reais")
+    with st.expander("📊 Sobre o Gráfico de Dispersão"):
+        st.markdown(
+            "O gráfico de dispersão abaixo ilustra a relação entre o torque real e o ângulo real, e a área hachurada representa a janela de aperto nominal atual. Observe como os pontos 'OK' e 'NOK' se distribuem em relação a esta janela, que muitas vezes é mais ampla do que o necessário.")
+
+    fig_scatter = go.Figure()
+
+    # Adicionar a área da janela de aperto nominal
+    fig_scatter.add_shape(
+        type="rect",
+        x0=st.session_state.current_ang_min,
+        y0=st.session_state.current_tq_min,
+        x1=st.session_state.current_ang_max,
+        y1=st.session_state.current_tq_max,
+        line=dict(color="RoyalBlue", width=2),
+        fillcolor="LightSkyBlue",
+        opacity=0.3,
+        layer="below",
+        name="Janela Nominal"
+    )
+    fig_scatter.add_annotation(
+        x=(st.session_state.current_ang_min + st.session_state.current_ang_max) / 2,
+        y=(st.session_state.current_tq_min + st.session_state.current_tq_max) / 2,
+        text="Janela Nominal Atual",
+        showarrow=False,
+        font=dict(color="RoyalBlue", size=10),
+        yanchor="middle",
+        xanchor="center"
+    )
+
+    # Adicionar os pontos de aperto reais, coloridos por Avaliação
+    colors = {'OK': 'green', 'NOK': 'red'}
+    avaliacoes_presentes = st.session_state.df_filtered['Avaliação'].unique().tolist()
+
+    for status in ['OK', 'NOK']:
+        if status in avaliacoes_presentes:
+            df_status = st.session_state.df_filtered[st.session_state.df_filtered['Avaliação'] == status]
+            fig_scatter.add_trace(go.Scatter(
+                x=df_status['ÂNG_rea'],
+                y=df_status['TQ_rea'],
+                mode='markers',
+                name=f'Pontos {status}',
+                marker=dict(color=colors[status], size=8, opacity=0.7),
+                hovertemplate=
+                '<b>Avaliação:</b> %{customdata[0]}<br>' +
+                '<b>Torque Real:</b> %{y:.2f}<br>' +
+                '<b>Ângulo Real:</b> %{x:.2f}<br>' +
+                '<b>GP:</b> %{customdata[1]}<br>' +
+                '<b>Ferramenta:</b> %{customdata[2]}<extra></extra>',
+                customdata=df_status[['Avaliação', 'GP', 'Ferramenta']]
+            ))
+
+    fig_scatter.update_layout(
+        title="Torque Real vs. Ângulo Real com Janela Nominal Atual",
+        xaxis_title="Ângulo Real Aplicado (°)",
+        yaxis_title="Torque Real Aplicado (Nm)",
+        hovermode="closest",
+        showlegend=True,
+        width=1000,
+        height=600
+    )
+    st.plotly_chart(fig_scatter, use_container_width=True)
+
+    # --- 3. Análise da Distribuição dos Dados Reais ---
+    st.header("3. Análise da Distribuição dos Dados Reais")
+    with st.expander("📈 Sobre os Histogramas com Curva Normal"):
+        st.markdown("""
+        Os histogramas abaixo mostram a distribuição dos valores de Torque Real e Ângulo Real para os dados filtrados, separados por avaliação 'OK'/'NOK'. A **curva normal** sobreposta ilustra a distribuição teórica normal (Gaussiana) com a média e desvio padrão dos seus dados. Isso ajuda a entender a dispersão e o centramento dos seus dados atuais, e se eles seguem uma distribuição aproximadamente normal.
+        """)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Distribuição do Torque Real (TQ_rea)")
+        fig_tq_hist = px.histogram(st.session_state.df_filtered, x='TQ_rea', color='Avaliação',
+                                   marginal="box",
+                                   title="Histograma de Torque Real por Avaliação",
+                                   labels={'TQ_rea': 'Torque Real (Nm)'},
+                                   color_discrete_map=colors)
+        fig_tq_hist.update_layout(bargap=0.1)
+
+        global_tq_min_data = st.session_state.df_filtered['TQ_rea'].min()
+        global_tq_max_data = st.session_state.df_filtered['TQ_rea'].max()
+        x_range_tq_global = np.linspace(global_tq_min_data, global_tq_max_data, 500)
+
+        for status in st.session_state.df_filtered['Avaliação'].unique():
+            df_status_for_curve = st.session_state.df_filtered[st.session_state.df_filtered['Avaliação'] == status]
+            if not df_status_for_curve.empty:
+                mean_tq = df_status_for_curve['TQ_rea'].mean()
+                std_tq = df_status_for_curve['TQ_rea'].std()
+
+                if std_tq > 0:
+                    pdf_values_tq = stats.norm.pdf(x_range_tq_global, mean_tq, std_tq)
+
+                    counts, bins = np.histogram(df_status_for_curve['TQ_rea'], bins='auto')
+                    if len(bins) > 1:
+                        bin_width_tq = bins[1] - bins[0]
+                        scaled_pdf_values_tq = pdf_values_tq * len(df_status_for_curve) * bin_width_tq
+                    else:  # Fallback para poucos pontos de dados
+                        scaled_pdf_values_tq = pdf_values_tq * len(df_status_for_curve)  # Escala mais simples
+
+                    fig_tq_hist.add_trace(go.Scatter(
+                        x=x_range_tq_global,
+                        y=scaled_pdf_values_tq,
+                        mode='lines',
+                        name=f'Curva Normal {status}',
+                        line=dict(color=colors[status], dash='dash', width=2),
+                        showlegend=True
+                    ))
+
+        st.plotly_chart(fig_tq_hist, use_container_width=True)
+
+    with col2:
+        st.subheader("Distribuição do Ângulo Real (ÂNG_rea)")
+        fig_ang_hist = px.histogram(st.session_state.df_filtered, x='ÂNG_rea', color='Avaliação',
+                                    marginal="box",
+                                    title="Histograma de Ângulo Real por Avaliação",
+                                    labels={'ÂNG_rea': 'Ângulo Real (°)'},
+                                    color_discrete_map=colors)
+        fig_ang_hist.update_layout(bargap=0.1)
+
+        global_ang_min_data = st.session_state.df_filtered['ÂNG_rea'].min()
+        global_ang_max_data = st.session_state.df_filtered['ÂNG_rea'].max()
+        x_range_ang_global = np.linspace(global_ang_min_data, global_ang_max_data, 500)
+
+        for status in st.session_state.df_filtered['Avaliação'].unique():
+            df_status_for_curve = st.session_state.df_filtered[st.session_state.df_filtered['Avaliação'] == status]
+            if not df_status_for_curve.empty:
+                mean_ang = df_status_for_curve['ÂNG_rea'].mean()
+                std_ang = df_status_for_curve['ÂNG_rea'].std()
+                if std_ang > 0:
+                    pdf_values_ang = stats.norm.pdf(x_range_ang_global, mean_ang, std_ang)
+
+                    counts, bins = np.histogram(df_status_for_curve['ÂNG_rea'], bins='auto')
+                    if len(bins) > 1:
+                        bin_width_ang = bins[1] - bins[0]
+                        scaled_pdf_values_ang = pdf_values_ang * len(df_status_for_curve) * bin_width_ang
+                    else:
+                        scaled_pdf_values_ang = pdf_values_ang * len(df_status_for_curve)  # Fallback
+
+                    fig_ang_hist.add_trace(go.Scatter(
+                        x=x_range_ang_global,
+                        y=scaled_pdf_values_ang,
+                        mode='lines',
+                        name=f'Curva Normal {status}',
+                        line=dict(color=colors[status], dash='dash', width=2),
+                        showlegend=True
+                    ))
+        st.plotly_chart(fig_ang_hist, use_container_width=True)
+
+    # --- 4. Proposta de Nova Janela de Aperto Otimizada e Mais Restritiva ---
+    st.header("4. Proposta de Nova Janela de Aperto Otimizada")
+    with st.expander("⚙️ Detalhes da Otimização da Janela"):
+        st.markdown("""
+        O objetivo é **reduzir e otimizar a 'janela de aperto'** com base no comportamento dos apertos considerados **"OK"** para os dados **atualmente filtrados**. Isso visa diminuir a tolerância e aumentar a precisão do seu processo, **reduzindo a possibilidade de falhas ou de "falsos OKs"**.
+
+        **Metodologia Sugerida: Percentis dos Dados 'OK'**
+        Calcularemos os percentis para `TQ_rea` e `ÂNG_rea` dos dados **"OK"** do subconjunto filtrado. Isso nos dará uma janela que engloba a maior parte dos apertos bem-sucedidos para essa combinação específica de Grupamento e Ferramenta, permitindo uma restrição mais rigorosa e realista do que seu processo consegue entregar consistentemente.
+        """)
+
+    df_ok_for_optimization = st.session_state.df_filtered[st.session_state.df_filtered['Avaliação'] == 'OK']
+
+    if df_ok_for_optimization.empty:
+        st.warning("""
+        Não há dados 'OK' no subconjunto de dados atualmente filtrado para propor uma nova janela de otimização.
+        Por favor, ajuste seus filtros (Grupamento, Ferramenta, Avaliação) para incluir dados 'OK' na sua seleção.
+        """)
+    else:
+        # Opção de percentil
+        st.subheader("Ajuste dos Percentis para Definir a Janela Otimizada")
+        with st.expander("🖐️ Como Ajustar os Percentis?"):
+            st.markdown("""
+            Utilize os sliders abaixo para definir os percentis inferior e superior. Esses percentis determinarão o quão "apertada" ou "permissiva" será a nova janela de aceitação.
+
+            -   **Percentil Inferior:** Define o limite mínimo. Se você escolher 0.1%, a nova janela será o valor acima do qual 99.9% dos apertos "OK" se encontram (ou seja, apenas 0.1% dos apertos "OK" mais baixos são desconsiderados). **Para tornar a janela MENOS restritiva no limite inferior (i.e., mais permissiva em valores baixos), DIMINUA este valor.**
+            -   **Percentil Superior:** Define o limite máximo. Se você escolher 99.9%, a nova janela será o valor abaixo do qual 99.9% dos apertos "OK" se encontram (ou seja, apenas 0.1% dos apertos "OK" mais altos são desconsiderados). **Para tornar a janela MENOS restritiva no limite superior (i.e., mais permissiva em valores altos), AUMENTE este valor.**
+
+            O objetivo é encontrar um equilíbrio entre a precisão (janela mais restrita) e a realidade operacional (janela que não gere alarmes excessivos para variações aceitáveis do operador). Os valores padrão (0.1% e 99.9%) já oferecem uma janela significativamente menos restritiva que 5% e 95%.
+            """)
+
+        # Ajustado padrão dos sliders para 0.1 e 99.9 para ser menos restritivo inicialmente
+        percentil_inferior = st.slider("Percentil Inferior (ex: 0.1% para tolerância mínima)", 0.0, 5.0, 0.1, 0.1)
+        percentil_superior = st.slider("Percentil Superior (ex: 99.9% para tolerância máxima)", 95.0, 100.0, 99.9, 0.1)
+
+        tq_novo_min = df_ok_for_optimization['TQ_rea'].quantile(percentil_inferior / 100)
+        tq_novo_max = df_ok_for_optimization['TQ_rea'].quantile(percentil_superior / 100)
+        ang_novo_min = df_ok_for_optimization['ÂNG_rea'].quantile(percentil_inferior / 100)
+        ang_novo_max = df_ok_for_optimization['ÂNG_rea'].quantile(percentil_superior / 100)
+
+        # --- TEXTO: NOVO INTERVALO OTIMIZADO ---
+        with st.expander("🎯 Novo Intervalo Otimizado (Detalhes)"):
+            st.success(f"""
+            O **novo intervalo otimizado e mais restritivo** (baseado nos dados 'OK' do filtro atual e nos percentis {percentil_inferior}% e {percentil_superior}%) é:
+            - **Novo Limite Mínimo de Torque (TQ_rea):** `{tq_novo_min:.3f} Nm`
+            - **Novo Limite Máximo de Torque (TQ_rea):** `{tq_novo_max:.3f} Nm`
+            - **Novo Limite Mínimo de Ângulo (ÂNG_rea):** `{ang_novo_min:.3f}°`
+            - **Novo Limite Máximo de Ângulo (ÂNG_rea):** `{ang_novo_max:.3f}°`
+            """)
+
+        # --- DATAFRAME DE COMPARAÇÃO DE LIMITES ---
+        st.subheader("Comparativo de Limites: Atual vs. Proposto")
+        data_limites = {
+            'Parâmetro': ['Torque Mínimo (Nm)', 'Torque Máximo (Nm)', 'Ângulo Mínimo (°)', 'Ângulo Máximo (°)'],
+            'Limite Nominal Atual': [st.session_state.current_tq_min, st.session_state.current_tq_max,
+                                     st.session_state.current_ang_min, st.session_state.current_ang_max],
+            'Novo Limite Otimizado': [tq_novo_min, tq_novo_max, ang_novo_min, ang_novo_max]
+        }
+        df_limites = pd.DataFrame(data_limites)
+        st.dataframe(df_limites.set_index('Parâmetro'))
+
+        # --- CÁLCULO E EXIBIÇÃO DE ST.METRICS DE REDUÇÃO DE ÁREA E DADOS REAIS ---
+        st.subheader("Métricas de Desempenho, Redução da Janela e Capacidade do Processo")
+
+        # Metrics for Real Data Overview
+        col_data1, col_data2, col_data3 = st.columns(3)
+        with col_data1:
+            st.metric(label="Total de Apertos Avaliados", value=len(st.session_state.df_filtered))
+        with col_data2:
+            st.metric(label="Torque Real Mínimo (Nm)", value=f"{st.session_state.df_filtered['TQ_rea'].min():.3f}")
+            st.metric(label="Torque Real Máximo (Nm)", value=f"{st.session_state.df_filtered['TQ_rea'].max():.3f}")
+        with col_data3:
+            st.metric(label="Ângulo Real Mínimo (°)", value=f"{st.session_state.df_filtered['ÂNG_rea'].min():.3f}")
+            st.metric(label="Ângulo Real Máximo (°)", value=f"{st.session_state.df_filtered['ÂNG_rea'].max():.3f}")
+
+        st.markdown("---")  # Separador visual
+
+        # Metrics for Area Reduction
+        area_nominal_tq = st.session_state.current_tq_max - st.session_state.current_tq_min
+        area_otimizada_tq = tq_novo_max - tq_novo_min
+
+        area_nominal_ang = st.session_state.current_ang_max - st.session_state.current_ang_min
+        area_otimizada_ang = ang_novo_max - ang_novo_min
+
+        percent_tq = 0
+        if area_nominal_tq > 0:
+            percent_tq = ((area_nominal_tq - area_otimizada_tq) / area_nominal_tq) * 100
+
+        percent_ang = 0
+        if area_nominal_ang > 0:
+            percent_ang = ((area_nominal_ang - area_otimizada_ang) / area_nominal_ang) * 100
+
+        area_nominal_total = area_nominal_tq * area_nominal_ang
+        area_otimizada_total = area_otimizada_tq * area_otimizada_ang
+
+        percent_total = 0
+        if area_nominal_total > 0:
+            percent_total = ((area_nominal_total - area_otimizada_total) / area_nominal_total) * 100
+
+        col_met1, col_met2, col_met3 = st.columns(3)
+        with col_met1:
+            st.metric(label="Redução na Largura de Torque", value=f"{percent_tq:.2f}%",
+                      delta=f"De {area_nominal_tq:.3f} para {area_otimizada_tq:.3f}", delta_color="inverse")
+        with col_met2:
+            st.metric(label="Redução na Largura de Ângulo", value=f"{percent_ang:.2f}%",
+                      delta=f"De {area_nominal_ang:.3f} para {area_otimizada_ang:.3f}", delta_color="inverse")
+        with col_met3:
+            st.metric(label="Redução na Área Total da Janela", value=f"{percent_total:.2f}%",
+                      delta=f"De {area_nominal_total:.3f} para {area_otimizada_total:.3f}", delta_color="inverse")
+
+        st.markdown("---")  # Separador visual
+
+        # Capacidade do Processo (Cp/Cpk)
+        col_cp1, col_cp2, col_cp3, col_cp4 = st.columns(4)
+
+        cp_tq, cpk_tq = calculate_cp_cpk(df_ok_for_optimization['TQ_rea'], tq_novo_max, tq_novo_min)
+        cp_ang, cpk_ang = calculate_cp_cpk(df_ok_for_optimization['ÂNG_rea'], ang_novo_max, ang_novo_min)
+
+        with col_cp1:
+            if cp_tq == float('inf'):
+                st.metric(label="Cp Torque", value="Perfeito")
+            else:
+                st.metric(label="Cp Torque", value=f"{cp_tq:.2f}")
+        with col_cp2:
+            if cpk_tq == float('inf'):
+                st.metric(label="Cpk Torque", value="Perfeito")
+            else:
+                st.metric(label="Cpk Torque", value=f"{cpk_tq:.2f}")
+        with col_cp3:
+            if cp_ang == float('inf'):
+                st.metric(label="Cp Ângulo", value="Perfeito")
+            else:
+                st.metric(label="Cp Ângulo", value=f"{cp_ang:.2f}")
+        with col_cp4:
+            if cpk_ang == float('inf'):
+                st.metric(label="Cpk Ângulo", value="Perfeito")
+            else:
+                st.metric(label="Cpk Ângulo", value=f"{cpk_ang:.2f}")
+
+        # Intelligent Cp/Cpk Analysis Text Box
+        with st.expander("📝 Interpretação da Capacidade do Processo (Cp/Cpk)"):
+            st.markdown(generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang))
+
+        st.markdown("---")  # Separador visual
+
+        st.markdown("#### Comparação Visual: Janela Nominal vs. Janela Otimizada por Percentis")
+        # Este gráfico é crucial para comparação visual e por isso não está em um expander.
+
+        fig_optimized = go.Figure()
+
+        fig_optimized.add_shape(
+            type="rect",
+            x0=st.session_state.current_ang_min,
+            y0=st.session_state.current_tq_min,
+            x1=st.session_state.current_ang_max,
+            y1=st.session_state.current_tq_max,
+            line=dict(color="RoyalBlue", width=2),
+            fillcolor="LightSkyBlue",
+            opacity=0.3,
+            layer="below",
+            name="Janela Nominal"
+        )
+        fig_optimized.add_annotation(
+            x=(st.session_state.current_ang_min + st.session_state.current_ang_max) / 2,
+            y=(st.session_state.current_tq_min + st.session_state.current_tq_max) / 2,
+            text="Janela Nominal Atual",
+            showarrow=False,
+            font=dict(color="RoyalBlue", size=10),
+            yanchor="middle",
+            xanchor="center"
+        )
+
+        fig_optimized.add_shape(
+            type="rect",
+            x0=ang_novo_min,
+            y0=tq_novo_min,
+            x1=ang_novo_max,
+            y1=tq_novo_max,
+            line=dict(color="DarkGreen", width=2, dash="dash"),
+            fillcolor="LightGreen",
+            opacity=0.4,
+            layer="above",
+            name="Janela Otimizada"
+        )
+        fig_optimized.add_annotation(
+            x=(ang_novo_min + ang_novo_max) / 2,
+            y=(tq_novo_min + tq_novo_max) / 2,
+            text="Janela Otimizada (Proposta)",
+            showarrow=False,
+            font=dict(color="DarkGreen", size=10),
+            yanchor="middle",
+            xanchor="center"
+        )
+
+        for status in ['OK', 'NOK']:
+            if status in avaliacoes_presentes:
+                df_status = st.session_state.df_filtered[st.session_state.df_filtered['Avaliação'] == status]
+                fig_optimized.add_trace(go.Scatter(
+                    x=df_status['ÂNG_rea'],
+                    y=df_status['TQ_rea'],
+                    mode='markers',
+                    name=f'Pontos {status}',
+                    marker=dict(color=colors[status], size=8, opacity=0.7),
+                    customdata=df_status[['Avaliação', 'GP', 'Ferramenta']],
+                    hovertemplate=
+                    '<b>Avaliação:</b> %{customdata[0]}<br>' +
+                    '<b>Torque Real:</b> %{y:.2f}<br>' +
+                    '<b>Ângulo Real:</b> %{x:.2f}<br>' +
+                    '<b>GP:</b> %{customdata[1]}<br>' +
+                    '<b>Ferramenta:</b> %{customdata[2]}<extra></extra>'
+                ))
+
+        fig_optimized.update_layout(
+            title="Comparação Visual: Janela Nominal vs. Janela Otimizada por Percentis",
+            xaxis_title="Ângulo Real Aplicado (°)",
+            yaxis_title="Torque Real Aplicado (Nm)",
+            hovermode="closest",
+            showlegend=True,
+            width=1000,
+            height=600
+        )
+        st.plotly_chart(fig_optimized, use_container_width=True)
+
+        with st.expander("❓ Como os percentis ajudam a otimizar e restringir a janela?"):
+            st.markdown("""
+            Os percentis atuam como uma ferramenta direta para você definir o "ponto ótimo" de confiança e restrição desejado:
+            -   **Controlam a Abrangência:** Ao escolher percentis como 0.1% e 99.9%, você está definindo que a nova janela deve conter 99.8% dos apertos "OK" mais consistentes do seu histórico. Os 0.2% extremos (0.1% abaixo, 0.1% acima) são considerados variações menos ideais.
+            -   **Foco no Desempenho Real:** A "otimização" aqui não é puramente algorítmica para um único ponto fixo, mas sim uma decisão estratégica para alinhar os limites com o **desempenho real e desejado** do processo. Se o seu processo "OK" nunca foi abaixo de 10 Nm, por exemplo, não faz sentido ter um limite mínimo de 5 Nm.
+            -   **Robustez a Outliers:** Percentis são menos sensíveis a outliers do que a média e desvio padrão. Isso significa que a janela proposta reflete com fidelidade a variação natural do seu processo "OK", sem ser distorcida por eventos extremos isolados.
+            """)
+
+        # --- 5. Próximos Passos e Recomendações ---
+        st.header("5. Próximos Passos e Recomendações")
+        with st.expander("➡️ Próximos Passos e Validação"):
+            st.markdown("""
+            Para validar e implementar esta nova janela de aperto **mais restritiva**, sugiro as seguintes ações:
+
+            1.  **Validação Piloto:** Implemente os novos limites em um grupo menor de ferramentas ou GPs para monitoramento. Isso permite um controle mais seguro durante a transição, avaliando o impacto real na taxa de "NOK".
+            2.  **Monitoramento Contínuo:** Utilize as novas janelas e monitore de perto a proporção de "NOK" (rejeitos) e "OK". Com uma janela mais apertada, os "NOK" deverão ser indicativos de desvios reais e não de variações aceitáveis dentro de uma tolerância excessivamente larga.
+            3.  **Análise de Capacidade do Processo (Cp/Cpk):** Com os novos limites mais rigorosos, realize uma análise de capacidade do processo para cada `GP` e `Ferramenta` individualmente. Isso quantificará quão bem seu processo está atendendo a essas especificações mais apertadas e qual a margem de segurança.
+                *   `Cp = (USL - LSL) / (6 * σ)`: Índice de capacidade potencial do processo.
+                *   `Cpk = min((X̄ - LSL) / (3 * σ), (USL - X̄) / (3 * σ))`: Índice de capacidade real do processo, considerando o centramento.
+            4.  **Otimização de Parâmetros da Ferramenta:** Se, mesmo com os dados "OK", ainda houver uma variação significativa, considere otimizar os parâmetros de aperto das ferramentas (velocidade, rampa, etc.) para buscar uma dispersão ainda menor.
+            5.  **Manutenção Preditiva:** Desvios constantes ou aumento de "NOK" após a implementação da janela mais restritiva em uma ferramenta específica podem indicar a necessidade urgente de calibração ou manutenção preventiva.
+
+            Lembre-se, o objetivo é ter uma janela de aperto que seja **realista** para a sua capacidade de produção (baseada no que o "OK" realmente produz) e que ao mesmo tempo sirva como um **limite eficaz** para identificar falhas genuínas, sem ser excessivamente permissiva.
+            """)
+
+        # --- SEÇÃO: CONSIDERAÇÕES FINAIS E CONFIANÇA ---
+        st.header("6. Considerações Finais e Confiança da Metodologia")
+        with st.expander("✨ Conclusões e Confiança da Metodologia"):
+            st.markdown("""
+            A metodologia proposta nesta aplicação baseia-se na análise dos dados históricos dos apertos considerados **"OK"** para **restringir e otimizar** a janela de aceitação. Esta abordagem é altamente confiável por diversas razões:
+
+            *   **Base Empírica e Objetiva:** Os novos limites são derivados diretamente do comportamento **real e bem-sucedido** do seu processo, filtrados pela combinação específica de Grupamento e Ferramenta que você está analisando. Não são valores teóricos ou arbitrários, mas sim uma representação estatística do que funciona na prática para aquela condição.
+            *   **Robustez Estatística:** O uso de **percentis** torna a definição dos limites robusta a outliers e distribuições não-normais. Isso significa que a janela proposta reflete com fidelidade a variação natural do seu processo "OK", sem ser distorcida por eventos extremos.
+            *   **Maior Sensibilidade do Controle:** Ao **estreitar a janela** para o que o processo realmente é capaz de produzir com qualidade, a aplicação se torna mais sensível a pequenas variações. Isso permite a **detecção precoce** de tendências ou desvios que antes poderiam passar despercebidos dentro de uma janela mais ampla, otimizando o controle de qualidade.
+            *   **Suporte à Melhoria Contínua:** Esta ferramenta fornece um `feedback` claro sobre a performance do processo. Uma janela mais precisa não só identifica falhas de forma mais acurada, mas também impulsiona a otimização dos parâmetros da ferramenta e das condições do processo para operar dentro de tolerâncias mais rigorosas.
+
+            **Recomendação de Ajuste dos Limites:**
+            A recomendação é ajustar os limites de torque e ângulo na linha de produção para os valores calculados como **"novo intervalo otimizado"**, que são **mais restritivos** e baseados na capacidade real do processo para a combinação selecionada de Grupamento e Ferramenta. Este ajuste deve ser feito com um plano de validação detalhado, começando possivelmente com um piloto em uma ferramenta ou linha específica, e monitorando de perto os resultados.
+
+            **Índice de Confiabilidade da Aplicação/Metodologia:**
+            Embora não exista um "índice de confiança" numérico único para a aplicação em si, a **confiança nesta metodologia é intrínseca à sua base estatística e empírica**. A precisão e a confiabilidade dos novos limites são diretas consequências da análise dos seus dados reais. A efetividade da aplicação e da metodologia se manifestará em:
+            *   **Redução de 'NOK' genuínos:** Com uma janela mais apertada, um 'NOK' significa que o aperto *realmente* está fora do padrão de qualidade aceitável do seu processo, não sendo apenas uma variação dentro de uma tolerância excessivamente larga.
+            *   **Melhora nos Índices de Capacidade (Cp/Cpk):** Após a implementação dos novos limites, os índices Cp e Cpk do seu processo tenderão a melhorar, indicando uma maior capacidade de atender às **especificações mais rigorosas**.
+            *   **Aumento da Qualidade Percebida:** Menos variações permitidas resultam em maior consistência e qualidade do produto final, reduzindo a chance de problemas de montagem ou falhas em campo.
+
+            Esta ferramenta é um passo significativo para transformar dados históricos em decisões proativas para a melhoria da qualidade e eficiência na sua fábrica, focando na **restrição da janela** para um controle mais robusto.
+            """)
+
+with tab2:
+    st.header("Definição Manual da Janela Otimizada")
+    with st.expander("📝 Sobre a Definição Manual"):
+        st.markdown("""
+        Esta seção permite que você defina os limites da nova janela de aperto manualmente, oferecendo controle total sobre o nível de restrição. Isso é útil se você tiver um conhecimento prévio dos limites desejados ou quiser explorar cenários específicos que não são diretamente otimizados pelos percentis.
+        """)
+
+    if st.session_state.df_filtered is None or st.session_state.df_filtered.empty:
+        st.warning(
+            "Por favor, carregue um arquivo CSV e aplique os filtros na aba 'Otimização por Percentis' para usar esta funcionalidade.")
+    else:
+        # CHAVE para Cp/Cpk: df_ok_for_optimization a partir do df_filtered
+        df_ok_for_optimization_manual = st.session_state.df_filtered[st.session_state.df_filtered['Avaliação'] == 'OK']
+
+        if df_ok_for_optimization_manual.empty:
+            st.warning("""
+            Não há dados 'OK' no subconjunto de dados atualmente filtrado para calcular Cp/Cpk.
+            Por favor, ajuste seus filtros (Grupamento, Ferramenta, Avaliação) para incluir dados 'OK' na sua seleção.
+            """)
+        else:
+            st.subheader("Insira os Limites da Nova Janela Manualmente:")
+
+            # Sugerir valores iniciais para os inputs manuais
+            min_tq_sug = st.session_state.df_filtered['TQ_rea'].min()
+            max_tq_sug = st.session_state.df_filtered['TQ_rea'].max()
+            min_ang_sug = st.session_state.df_filtered['ÂNG_rea'].min()
+            max_ang_sug = st.session_state.df_filtered['ÂNG_rea'].max()
+
+            # Inputs para os novos limites manuais
+            col_manual1, col_manual2 = st.columns(2)
+            with col_manual1:
+                manual_tq_min = st.number_input("Novo Torque Mínimo (Nm):", value=float(f"{min_tq_sug:.3f}"),
+                                                format="%.3f", key="manual_tq_min")
+                manual_tq_max = st.number_input("Novo Torque Máximo (Nm):", value=float(f"{max_tq_sug:.3f}"),
+                                                format="%.3f", key="manual_tq_max")
+            with col_manual2:
+                manual_ang_min = st.number_input("Novo Ângulo Mínimo (°):", value=float(f"{min_ang_sug:.3f}"),
+                                                 format="%.3f", key="manual_ang_min")
+                manual_ang_max = st.number_input("Novo Ângulo Máximo (°):", value=float(f"{max_ang_sug:.3f}"),
+                                                 format="%.3f", key="manual_ang_max")
+
+            # Validação simples dos inputs manuais
+            if manual_tq_min >= manual_tq_max or manual_ang_min >= manual_ang_max:
+                st.error("Os limites mínimos devem ser menores que os limites máximos. Por favor, ajuste os valores.")
+            else:
+                st.markdown("#### Comparativo de Limites: Atual vs. Manualmente Definido")
+                data_limites_manual = {
+                    'Parâmetro': ['Torque Mínimo (Nm)', 'Torque Máximo (Nm)', 'Ângulo Mínimo (°)', 'Ângulo Máximo (°)'],
+                    'Limite Nominal Atual': [st.session_state.current_tq_min, st.session_state.current_tq_max,
+                                             st.session_state.current_ang_min, st.session_state.current_ang_max],
+                    'Novo Limite Manual': [manual_tq_min, manual_tq_max, manual_ang_min, manual_ang_max]
+                }
+                df_limites_manual = pd.DataFrame(data_limites_manual)
+                st.dataframe(df_limites_manual.set_index('Parâmetro'))
+
+                st.markdown("---")
+
+                # --- CÁLCULO E EXIBIÇÃO DE ST.METRICS PARA DEFINIÇÃO MANUAL ---
+                st.subheader("Métricas para a Janela Manualmente Definida")
+
+                col_data_man1, col_data_man2, col_data_man3 = st.columns(3)
+                with col_data_man1:
+                    st.metric(label="Total de Apertos Avaliados", value=len(st.session_state.df_filtered))
+                with col_data_man2:
+                    st.metric(label="Torque Real Mínimo (Nm)",
+                              value=f"{st.session_state.df_filtered['TQ_rea'].min():.3f}")
+                    st.metric(label="Torque Real Máximo (Nm)",
+                              value=f"{st.session_state.df_filtered['TQ_rea'].max():.3f}")
+                with col_data_man3:
+                    st.metric(label="Ângulo Real Mínimo (°)",
+                              value=f"{st.session_state.df_filtered['ÂNG_rea'].min():.3f}")
+                    st.metric(label="Ângulo Real Máximo (°)",
+                              value=f"{st.session_state.df_filtered['ÂNG_rea'].max():.3f}")
+
+                st.markdown("---")  # Separador visual
+
+                area_nominal_tq_manual = st.session_state.current_tq_max - st.session_state.current_tq_min
+                area_otimizada_tq_manual = manual_tq_max - manual_tq_min
+
+                area_nominal_ang_manual = st.session_state.current_ang_max - st.session_state.current_ang_min
+                area_otimizada_ang_manual = manual_ang_max - manual_ang_min
+
+                percent_tq_manual = 0
+                if area_nominal_tq_manual > 0:
+                    percent_tq_manual = ((
+                                                     area_nominal_tq_manual - area_otimizada_tq_manual) / area_nominal_tq_manual) * 100
+
+                percent_ang_manual = 0
+                if area_nominal_ang_manual > 0:
+                    percent_ang_manual = ((
+                                                      area_nominal_ang_manual - area_otimizada_ang_manual) / area_nominal_ang_manual) * 100
+
+                area_nominal_total_manual = area_nominal_tq_manual * area_nominal_ang_manual
+                area_otimizada_total_manual = area_otimizada_tq_manual * area_otimizada_ang_manual
+
+                percent_total_manual = 0
+                if area_nominal_total_manual > 0:
+                    percent_total_manual = ((
+                                                        area_nominal_total_manual - area_otimizada_total_manual) / area_nominal_total_manual) * 100
+
+                col_met_man1, col_met_man2, col_met_man3 = st.columns(3)
+                with col_met_man1:
+                    st.metric(label="Redução na Largura de Torque", value=f"{percent_tq_manual:.2f}%",
+                              delta=f"De {area_nominal_tq_manual:.3f} para {area_otimizada_tq_manual:.3f}",
+                              delta_color="inverse")
+                with col_met_man2:
+                    st.metric(label="Redução na Largura de Ângulo", value=f"{percent_ang_manual:.2f}%",
+                              delta=f"De {area_nominal_ang_manual:.3f} para {area_otimizada_ang_manual:.3f}",
+                              delta_color="inverse")
+                with col_met_man3:
+                    st.metric(label="Redução na Área Total da Janela", value=f"{percent_total_manual:.2f}%",
+                              delta=f"De {area_nominal_total_manual:.3f} para {area_otimizada_total_manual:.3f}",
+                              delta_color="inverse")
+
+                st.markdown("---")  # Separador visual
+
+                # Capacidade do Processo (Cp/Cpk) para limites manuais
+                col_cp_man1, col_cp_man2, col_cp_man3, col_cp_man4 = st.columns(4)
+
+                cp_tq_manual, cpk_tq_manual = calculate_cp_cpk(df_ok_for_optimization_manual['TQ_rea'], manual_tq_max,
+                                                               manual_tq_min)
+                cp_ang_manual, cpk_ang_manual = calculate_cp_cpk(df_ok_for_optimization_manual['ÂNG_rea'],
+                                                                 manual_ang_max, manual_ang_min)
+
+                with col_cp_man1:
+                    if cp_tq_manual == float('inf'):
+                        st.metric(label="Cp Torque", value="Perfeito")
+                    else:
+                        st.metric(label="Cp Torque", value=f"{cp_tq_manual:.2f}")
+                with col_cp_man2:
+                    if cpk_tq_manual == float('inf'):
+                        st.metric(label="Cpk Torque", value="Perfeito")
+                    else:
+                        st.metric(label="Cpk Torque", value=f"{cpk_tq_manual:.2f}")
+                with col_cp_man3:
+                    if cp_ang_manual == float('inf'):
+                        st.metric(label="Cp Ângulo", value="Perfeito")
+                    else:
+                        st.metric(label="Cp Ângulo", value=f"{cp_ang_manual:.2f}")
+                with col_cp_man4:
+                    if cpk_ang_manual == float('inf'):
+                        st.metric(label="Cpk Ângulo", value="Perfeito")
+                    else:
+                        st.metric(label="Cpk Ângulo", value=f"{cpk_ang_manual:.2f}")
+
+                # Intelligent Cp/Cpk Analysis Text Box for Manual Limits
+                with st.expander("📝 Interpretação da Capacidade do Processo (Cp/Cpk)"):
+                    st.markdown(generate_cp_cpk_analysis(cp_tq_manual, cpk_tq_manual, cp_ang_manual, cpk_ang_manual))
+
+                st.markdown("---")  # Separador visual
+
+                st.markdown("#### Comparação Visual: Janela Nominal vs. Janela Definida Manualmente")
+
+                fig_manual = go.Figure()
+
+                fig_manual.add_shape(
+                    type="rect",
+                    x0=st.session_state.current_ang_min,
+                    y0=st.session_state.current_tq_min,
+                    x1=st.session_state.current_ang_max,
+                    y1=st.session_state.current_tq_max,
+                    line=dict(color="RoyalBlue", width=2),
+                    fillcolor="LightSkyBlue",
+                    opacity=0.3,
+                    layer="below",
+                    name="Janela Nominal"
+                )
+                fig_manual.add_annotation(
+                    x=(st.session_state.current_ang_min + st.session_state.current_ang_max) / 2,
+                    y=(st.session_state.current_tq_min + st.session_state.current_tq_max) / 2,
+                    text="Janela Nominal Atual",
+                    showarrow=False,
+                    font=dict(color="RoyalBlue", size=10),
+                    yanchor="middle",
+                    xanchor="center"
+                )
+
+                fig_manual.add_shape(
+                    type="rect",
+                    x0=manual_ang_min,
+                    y0=manual_tq_min,
+                    x1=manual_ang_max,
+                    y1=manual_tq_max,
+                    line=dict(color="DarkOrange", width=2, dash="dot"),  # Cor diferente para manual
+                    fillcolor="LightSalmon",
+                    opacity=0.4,
+                    layer="above",
+                    name="Janela Manual"
+                )
+                fig_manual.add_annotation(
+                    x=(manual_ang_min + manual_ang_max) / 2,
+                    y=(manual_tq_min + manual_tq_max) / 2,
+                    text="Janela Manual (Proposta)",
+                    showarrow=False,
+                    font=dict(color="DarkOrange", size=10),
+                    yanchor="middle",
+                    xanchor="center"
+                )
+
+                for status in ['OK', 'NOK']:
+                    if status in avaliacoes_presentes:
+                        df_status = st.session_state.df_filtered[st.session_state.df_filtered['Avaliação'] == status]
+                        fig_manual.add_trace(go.Scatter(
+                            x=df_status['ÂNG_rea'],
+                            y=df_status['TQ_rea'],
+                            mode='markers',
+                            name=f'Pontos {status}',
+                            marker=dict(color=colors[status], size=8, opacity=0.7),
+                            customdata=df_status[['Avaliação', 'GP', 'Ferramenta']],
+                            hovertemplate=
+                            '<b>Avaliação:</b> %{customdata[0]}<br>' +
+                            '<b>Torque Real:</b> %{y:.2f}<br>' +
+                            '<b>Ângulo Real:</b> %{x:.2f}<br>' +
+                            '<b>GP:</b> %{customdata[1]}<br>' +
+                            '<b>Ferramenta:</b> %{customdata[2]}<extra></extra>'
+                        ))
+
+                fig_manual.update_layout(
+                    title="Comparação Visual: Janela Nominal vs. Janela Definida Manualmente",
+                    xaxis_title="Ângulo Real Aplicado (°)",
+                    yaxis_title="Torque Real Aplicado (Nm)",
+                    hovermode="closest",
+                    showlegend=True,
+                    width=1000,
+                    height=600
+                )
+                st.plotly_chart(fig_manual, use_container_width=True)
