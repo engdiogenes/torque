@@ -6,14 +6,14 @@ from scipy import stats
 import numpy as np  # Necessário para cálculos com a curva normal
 
 # --- Configuração da Página ---
-st.set_page_config(layout="wide", page_title="JLR - Análise de Janela de Aperto", initial_sidebar_state="expanded")
+st.set_page_config(layout="wide", page_title="JLR Torque integrity", initial_sidebar_state="expanded")
 
 
 # --- Funções Auxiliares ---
 def calculate_cp_cpk(data_series, usl, lsl):
     """Calculates Cp and Cpk for a given data series and specification limits."""
     mean = data_series.mean()
-    std_dev = data_series.std()  # Corrigido: era data_series.S_t.d()
+    std_dev = data_series.std()
 
     if std_dev == 0:
         # If std_dev is 0, all data points are identical.
@@ -39,8 +39,31 @@ def calculate_cp_cpk(data_series, usl, lsl):
     return cp, cpk
 
 
-def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang):
-    """Generates an intelligent text analysis based on Cp and Cpk values."""
+def suggest_optimal_limits(data_series, target_cpk):
+    """
+    Calculates suggested LSL and USL to achieve a target Cpk,
+    assuming the process mean is centered.
+    """
+    mean = data_series.mean()
+    std_dev = data_series.std()
+
+    if std_dev == 0:
+        # If no variation, the process is already perfectly capable around its mean.
+        # Any LSL <= mean <= USL results in infinite Cpk.
+        # For practical display, suggest the mean value as the target.
+        return mean, mean
+
+    # Calculate the required half-width for the given target Cpk
+    half_width = 3 * target_cpk * std_dev
+
+    lsl_suggested = mean - half_width
+    usl_suggested = mean + half_width
+
+    return lsl_suggested, usl_suggested
+
+
+def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang, df_ok_for_analysis):
+    """Generates an intelligent text analysis based on Cp and Cpk values and suggests optimal limits."""
     analysis_text = []
 
     # --- Analysis for Torque ---
@@ -145,16 +168,76 @@ def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang):
     analysis_text.append(
         "É fundamental monitorar continuamente esses índices, especialmente o Cpk, para garantir a estabilidade e a centralização do processo dentro dos novos limites definidos. Um Cpk abaixo de 1.33 geralmente indica necessidade de ação para melhoria do processo.")
 
+    # --- New Section: Optimal Limits Recommendation ---
+    analysis_text.append("\n### Recomendações de Limites Otimizados com Base na Capacidade do Processo:\n")
+    analysis_text.append("Para maximizar a capacidade (Cpk) do seu processo **atual (dados 'OK' filtrados)**, "
+                         "e considerando sua variabilidade inerente, podemos sugerir limites que teoricamente "
+                         "atingiriam um determinado Cpk alvo. Essas sugestões são puramente estatísticas "
+                         "e devem ser validadas pela engenharia e viabilidade prática.\n")
+
+    # Define target Cpk values
+    target_cpk_good = 1.33
+    target_cpk_excellent = 1.67
+
+    # Torque recommendations
+    analysis_text.append("#### Para Torque (Nm):")
+    mean_tq_ok = df_ok_for_analysis['TQ_rea'].mean()
+    std_tq_ok = df_ok_for_analysis['TQ_rea'].std()
+
+    if std_tq_ok == 0:
+        analysis_text.append(
+            f"  - O processo de Torque tem **variação nula** nos dados 'OK' filtrados. Isso significa que ele já é intrinsecamente capaz de atender a qualquer limite de engenharia razoável que contenha o valor médio de {mean_tq_ok:.3f} Nm. Os limites atuais que você definiu são perfeitamente adequados, ou pode-se considerar um único valor alvo.")
+    else:
+        lsl_tq_good, usl_tq_good = suggest_optimal_limits(df_ok_for_analysis['TQ_rea'], target_cpk_good)
+        lsl_tq_excellent, usl_tq_excellent = suggest_optimal_limits(df_ok_for_analysis['TQ_rea'], target_cpk_excellent)
+
+        analysis_text.append(f"  - **Meta Cpk $\ge$ {target_cpk_good:.2f} (Processo Bom):**")
+        analysis_text.append(f"    - Limite Inferior Sugerido: `{lsl_tq_good:.3f} Nm`")
+        analysis_text.append(f"    - Limite Superior Sugerido: `{usl_tq_good:.3f} Nm`")
+        analysis_text.append(f"    - (Largura total: `{usl_tq_good - lsl_tq_good:.3f} Nm`)")
+
+        analysis_text.append(f"  - **Meta Cpk $\ge$ {target_cpk_excellent:.2f} (Processo Altamente Capaz / 6 Sigma):**")
+        analysis_text.append(f"    - Limite Inferior Sugerido: `{lsl_tq_excellent:.3f} Nm`")
+        analysis_text.append(f"    - Limite Superior Sugerido: `{usl_tq_excellent:.3f} Nm`")
+        analysis_text.append(f"    - (Largura total: `{usl_tq_excellent - lsl_tq_excellent:.3f} Nm`)")
+
+    # Angle recommendations
+    analysis_text.append("\n#### Para Ângulo (°):")
+    mean_ang_ok = df_ok_for_analysis['ÂNG_rea'].mean()
+    std_ang_ok = df_ok_for_analysis['ÂNG_rea'].std()
+
+    if std_ang_ok == 0:
+        analysis_text.append(
+            f"  - O processo de Ângulo tem **variação nula** nos dados 'OK' filtrados. Isso significa que ele já é intrinsecamente capaz de atender a qualquer limite de engenharia razoável que contenha o valor médio de {mean_ang_ok:.3f}°. Os limites atuais que você definiu são perfeitamente adequados, ou pode-se considerar um único valor alvo.")
+    else:
+        lsl_ang_good, usl_ang_good = suggest_optimal_limits(df_ok_for_analysis['ÂNG_rea'], target_cpk_good)
+        lsl_ang_excellent, usl_ang_excellent = suggest_optimal_limits(df_ok_for_analysis['ÂNG_rea'],
+                                                                      target_cpk_excellent)
+
+        analysis_text.append(f"  - **Meta Cpk $\ge$ {target_cpk_good:.2f} (Processo Bom):**")
+        analysis_text.append(f"    - Limite Inferior Sugerido: `{lsl_ang_good:.3f}°`")
+        analysis_text.append(f"    - Limite Superior Sugerido: `{usl_ang_good:.3f}°`")
+        analysis_text.append(f"    - (Largura total: `{usl_ang_good - lsl_ang_good:.3f}°`)")
+
+        analysis_text.append(f"  - **Meta Cpk $\ge$ {target_cpk_excellent:.2f} (Processo Altamente Capaz / 6 Sigma):**")
+        analysis_text.append(f"    - Limite Inferior Sugerido: `{lsl_ang_excellent:.3f}°`")
+        analysis_text.append(f"    - Limite Superior Sugerido: `{usl_ang_excellent:.3f}°`")
+        analysis_text.append(f"    - (Largura total: `{usl_ang_excellent - lsl_ang_excellent:.3f}°`)")
+
+    analysis_text.append(
+        "\n_**Nota:** Estas são sugestões estatísticas para otimizar o Cpk dada a variabilidade observada. É crucial que esses limites sejam avaliados em termos de **engenharia, segurança e funcionalidade do produto.** Limites muito apertados, embora estatisticamente ótimos, podem não ser viáveis na prática ou gerar muitos 'NOKs'' falsos se a causa da variabilidade não for controlada._")
+
+
     return "\n".join(analysis_text)
 
 
 # --- Título da Aplicação ---
-st.title("🔩 Análise e Otimização da Janela de Aperto Automotivo")
+st.title("Análise e Otimização da Janela de Aperto - JLR Torque integrity")
 with st.expander("💡 Entendimento da Aplicação"):
     st.markdown("""
     Esta aplicação permite carregar dados de aperto, visualizar a relação entre torque e ângulo,
     e aplicar metodologias estatísticas e manuais para propor uma **nova e mais precisa 'janela de aperto'**,
-    visando aumentar a precisão do controle de qualidade e reduzir a possibilidade de erro do operador.
+    visando aumentar a precisão do controle de qualidade e reduzir a possibilidade de erro operacional. Desenvolvido por: Eng Diógenes Oliveira
     """)
 
 # --- 0. Inicialização do Session State para Compartilhamento de Dados ---
@@ -452,7 +535,7 @@ with tab1:
         ang_novo_max = df_ok_for_optimization['ÂNG_rea'].quantile(percentil_superior / 100)
 
         # --- TEXTO: NOVO INTERVALO OTIMIZADO ---
-        with st.expander("🎯 Novo Intervalo Otimizado (Detalhes)"):
+        with st.expander("�� Novo Intervalo Otimizado (Detalhes)"):
             st.success(f"""
             O **novo intervalo otimizado e mais restritivo** (baseado nos dados 'OK' do filtro atual e nos percentis {percentil_inferior}% e {percentil_superior}%) é:
             - **Novo Limite Mínimo de Torque (TQ_rea):** `{tq_novo_min:.3f} Nm`
@@ -551,8 +634,9 @@ with tab1:
                 st.metric(label="Cpk Ângulo", value=f"{cpk_ang:.2f}")
 
         # Intelligent Cp/Cpk Analysis Text Box
-        with st.expander("📝 Interpretação da Capacidade do Processo (Cp/Cpk)"):
-            st.markdown(generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang))
+        with st.expander("📝 Interpretação e Recomendações de Limites (Cp/Cpk)"):
+            # Pass df_ok_for_optimization to the analysis function for optimal limits calculation
+            st.markdown(generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang, df_ok_for_optimization))
 
         st.markdown("---")  # Separador visual
 
@@ -828,8 +912,10 @@ with tab2:
                         st.metric(label="Cpk Ângulo", value=f"{cpk_ang_manual:.2f}")
 
                 # Intelligent Cp/Cpk Analysis Text Box for Manual Limits
-                with st.expander("📝 Interpretação da Capacidade do Processo (Cp/Cpk)"):
-                    st.markdown(generate_cp_cpk_analysis(cp_tq_manual, cpk_tq_manual, cp_ang_manual, cpk_ang_manual))
+                with st.expander("📝 Interpretação e Recomendações de Limites (Cp/Cpk)"):
+                    # Pass df_ok_for_optimization_manual to the analysis function
+                    st.markdown(generate_cp_cpk_analysis(cp_tq_manual, cpk_tq_manual, cp_ang_manual, cpk_ang_manual,
+                                                         df_ok_for_optimization_manual))
 
                 st.markdown("---")  # Separador visual
 
