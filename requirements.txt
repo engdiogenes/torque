@@ -6,4 +6,6 @@ pillow
 matplotlib
 scipy
 pandas
+opencv-python-headless
+
 
