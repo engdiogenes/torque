@@ -4,14 +4,22 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy import stats
 import numpy as np
-import datetime  # Import para a data atual
+import datetime
+
+# Para geração de PDF (remova se for usar apenas HTML)
+# from fpdf import FPDF
+# import io
+# import os
+# import plotly.io as pio
+# pio.kaleido.scope.chromium_args = ("--no-sandbox", "--single-process", "--disable-gpu")
+
 
 # --- Configuração da Página ---
 st.set_page_config(layout="wide", page_title="JLR Torque integrity", initial_sidebar_state="expanded")
 
 
 # --- Funções Auxiliares ---
-@st.cache_data # Adicionado cache para a função de cálculo de Cp/Cpk
+@st.cache_data  # Adicionado cache para a função de cálculo de Cp/Cpk
 def calculate_cp_cpk(data_series, usl, lsl):
     """Calculates Cp and Cpk for a given data series and specification limits."""
     mean = data_series.mean()
@@ -35,7 +43,7 @@ def calculate_cp_cpk(data_series, usl, lsl):
     return cp, cpk
 
 
-@st.cache_data # Adicionado cache para a função
+@st.cache_data  # Adicionado cache para a função
 def suggest_optimal_limits(data_series, target_cpk):
     """
     Calculates suggested LSL and USL to achieve a target Cpk,
@@ -89,7 +97,7 @@ def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang, df_ok_for_analysis)
         analysis_text.append("Recomenda-se monitoramento atento e esforços de otimização.")
     elif 1.33 <= cpk_tq < 1.67:
         analysis_text.append(
-            f"O processo para **Torque** demonstra **boa capacidade (Cpk = {cpk_tq:.2f})** em relação aos limites fixos da engenharia. É considerado adequado para a maioria das aplicações, indicando que o processo é estável e centrado.")
+            f"O processo para **Torque** demonstra **boa capacidade (Cpk = {cp_tq:.2f})** em relação aos limites fixos da engenharia. É considerado adequado para a maioria das aplicações, indicando que o processo é estável e centrado.")
         if cp_tq - cpk_tq > 0.1:  # Significant difference indicates centering issue
             analysis_text.append(
                 f"  - Uma pequena diferença entre Cp ({cp_tq:.2f}) e Cpk ({cpk_tq:.2f}) sugere que, embora capaz, há uma oportunidade para um centramento ainda melhor.")
@@ -128,13 +136,13 @@ def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang, df_ok_for_analysis)
         analysis_text.append("Recomenda-se monitoramento atento e esforços de otimização.")
     elif 1.33 <= cpk_ang < 1.67:
         analysis_text.append(
-            f"O processo para **Ângulo** demonstra **boa capacidade (Cpk = {cpk_ang:.2f})**. É considerado adequado para a maioria das aplicações, indicando que o processo é estável e centrado.")
+            f"O processo para **Ângulo** demonstra **boa capacidade (Cpk = {cp_ang:.2f})**. É considerado adequado para a maioria das aplicações, indicando que o processo é estável e centrado.")
         if cp_ang - cpk_ang > 0.1:  # Significant difference indicates centering issue
             analysis_text.append(
                 f"  - Uma pequena diferença entre Cp ({cp_ang:.2f}) e Cpk ({cpk_ang:.2f}) sugere que, embora capaz, há uma oportunidade para um centramento ainda melhor.")
     else:  # cpk_ang >= 1.67
         analysis_text.append(
-            f"O processo para **Ângulo** é **altamente capaz (Cpk = {cpk_ang:.2f})**. Isso indica um processo muito robusto, com baixa probabilidade de produzir itens fora das especificações, ideal para aplicações Six Sigma.")
+            f"O processo para **Ângulo** é **altamente capaz (Cpk = {cpk_ang:.2f})** em relação aos limites propostos. Isso indica um processo muito robusto, com baixa probabilidade de produzir itens fora das especificações, ideal para aplicações Six Sigma.")
         if cp_ang - cpk_ang > 0.1:  # Significant difference indicates centering issue
             analysis_text.append(
                 f"  - Apesar da alta capacidade, uma diferença entre Cp ({cp_ang:.2f}) e Cpk ({cpk_ang:.2f}) pode indicar uma pequena oportunidade de otimização no centramento.")
@@ -156,7 +164,7 @@ def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang, df_ok_for_analysis)
     analysis_text.append("Os limites de Torque são definidos pela engenharia e não são ajustados por esta ferramenta. "
                          "Para o **Ângulo**, podemos sugerir limites que teoricamente atingiriam um determinado Cpk alvo, "
                          "com base na variabilidade inerente dos seus dados 'OK'. Essas sugestões são puramente estatísticas "
-                         "e devem ser validadas pela engenharia e viabilidade prática.\n")
+                         "e devem ser validadas pela engenharia e viabilidade prática.\\n")
 
     # Define target Cpk values
     target_cpk_good = 1.33
@@ -183,12 +191,13 @@ def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang, df_ok_for_analysis)
         lsl_ang_excellent, usl_ang_excellent = suggest_optimal_limits(df_ok_for_analysis['ÂNG_rea'],
                                                                       target_cpk_excellent)
 
-        analysis_text.append(f"  - **Meta Cpk $\ge$ {target_cpk_good:.2f} (Processo Bom):**")
+        analysis_text.append(f"  - **Meta Cpk $\\ge$ {target_cpk_good:.2f} (Processo Bom):**")
         analysis_text.append(f"    - Limite Inferior Sugerido: `{lsl_ang_good:.3f}°`")
         analysis_text.append(f"    - Limite Superior Sugerido: `{usl_ang_good:.3f}°`")
         analysis_text.append(f"    - (Largura total: `{usl_ang_good - lsl_ang_good:.3f}°`)\n")
 
-        analysis_text.append(f"  - **Meta Cpk $\ge$ {target_cpk_excellent:.2f} (Processo Altamente Capaz / 6 Sigma):**")
+        analysis_text.append(
+            f"  - **Meta Cpk $\\ge$ {target_cpk_excellent:.2f} (Processo Altamente Capaz / 6 Sigma):**")
         analysis_text.append(f"    - Limite Inferior Sugerido: `{lsl_ang_excellent:.3f}°`")
         analysis_text.append(f"    - Limite Superior Sugerido: `{usl_ang_excellent:.3f}°`")
         analysis_text.append(f"    - (Largura total: `{usl_ang_excellent - lsl_ang_excellent:.3f}°`)\n")
@@ -199,7 +208,7 @@ def generate_cp_cpk_analysis(cp_tq, cpk_tq, cp_ang, cpk_ang, df_ok_for_analysis)
     return "".join(analysis_text)
 
 
-@st.cache_data # Adicionado cache para a função
+@st.cache_data  # Adicionado cache para a função
 def generate_comparison_chart(df_filtered, current_ang_min, current_tq_min, current_ang_max, current_tq_max,
                               new_ang_min, new_tq_min, new_ang_max, new_tq_max, chart_title):
     colors = {'OK': 'green', 'NOK': 'red'}
@@ -281,7 +290,7 @@ def generate_comparison_chart(df_filtered, current_ang_min, current_tq_min, curr
     return fig
 
 
-@st.cache_data # Adicionado cache para a função
+@st.cache_data  # Adicionado cache para a função
 def generate_histograms(df_filtered):
     colors = {'OK': 'green', 'NOK': 'red'}
     figs = {}
@@ -390,15 +399,14 @@ if 'current_ang_max' not in st.session_state:
     st.session_state.current_ang_max = 0.0
 
 # Initialize session state variables for manual tab results (for report tab)
-# Estes são inicializados com 0.0 e depois preenchidos pelos cálculos ou widgets
 if 'manual_tq_min' not in st.session_state:
     st.session_state.manual_tq_min = 0.0
 if 'manual_tq_max' not in st.session_state:
     st.session_state.manual_tq_max = 0.0
 if 'manual_ang_min' not in st.session_state:
-    st.session_state.manual_ang_min = 0.0 # Valor inicial
+    st.session_state.manual_ang_min = 0.0
 if 'manual_ang_max' not in st.session_state:
-    st.session_state.manual_ang_max = 0.0 # Valor inicial
+    st.session_state.manual_ang_max = 0.0
 if 'cp_tq_manual' not in st.session_state:
     st.session_state.cp_tq_manual = 0.0
 if 'cpk_tq_manual' not in st.session_state:
@@ -419,7 +427,7 @@ if 'num_resp_analise' not in st.session_state:
     st.session_state.num_resp_analise = 1
 if 'num_resp_aprov' not in st.session_state:
     st.session_state.num_resp_aprov = 1
-if 'resultado_aprovado' not in st.session_state: # Usado para o st.radio
+if 'resultado_aprovado' not in st.session_state:
     st.session_state.resultado_aprovado = None
 
 # --- Upload de Arquivo ---
@@ -564,7 +572,7 @@ with tab1:
                 customdata=df_status[['Avaliação', 'GP', 'Ferramenta']]
             ))
 
-    st.plotly_chart(fig_scatter, use_container_width=True, key="scatter_tab1_original") # Adicionada key
+    st.plotly_chart(fig_scatter, use_container_width=True, key="scatter_tab1_original")  # Adicionada key
 
     # --- 3. Análise da Distribuição dos Dados Reais ---
     st.header("3. Análise da Distribuição dos Dados Reais")
@@ -580,11 +588,13 @@ with tab1:
 
     with col1:
         st.subheader("Distribuição do Torque Real (TQ_rea)")
-        st.plotly_chart(histograms_tab1['torque_histogram'], use_container_width=True, key="tq_hist_tab1") # Adicionada key
+        st.plotly_chart(histograms_tab1['torque_histogram'], use_container_width=True,
+                        key="tq_hist_tab1")  # Adicionada key
 
     with col2:
         st.subheader("Distribuição do Ângulo Real (ÂNG_rea)")
-        st.plotly_chart(histograms_tab1['angle_histogram'], use_container_width=True, key="ang_hist_tab1") # Adicionada key
+        st.plotly_chart(histograms_tab1['angle_histogram'], use_container_width=True,
+                        key="ang_hist_tab1")  # Adicionada key
 
     # --- 4. Proposta de Nova Janela de Aperto Otimizada e Mais Restritiva ---
     st.header("4. Proposta de Nova Janela de Aperto Otimizada para o Ângulo")
@@ -748,14 +758,14 @@ with tab1:
             "Comparação Visual: Janela Nominal vs. Janela Otimizada por Percentis"
         )
 
-        st.plotly_chart(fig_optimized, use_container_width=True, key="comparison_optimized_tab1") # Adicionada key
+        st.plotly_chart(fig_optimized, use_container_width=True, key="comparison_optimized_tab1")  # Adicionada key
 
         with st.expander("❓ Como os percentis ajudam a otimizar e restringir a janela (para Ângulo)?"):
             st.markdown("""
             Os percentis atuam como uma ferramenta direta para você definir o "ponto ótimo" de confiança e restrição desejado **para o Ângulo**:
             -   **Controlam a Abrangência do Ângulo:** Ao escolher percentis como 0.1% e 99.9%, você está definindo que a nova janela para o ângulo deve conter 99.8% dos apertos "OK" mais consistentes do seu histórico. Os 0.2% extremos (0.1% abaixo, 0.1% acima) são considerados variações menos ideais.
             -   **Foco no Desempenho Real do Ângulo:** A "otimização" aqui não é puramente algorítmica para um único ponto fixo, mas sim uma decisão estratégica para alinhar os limites com o **desempenho real e desejado** do processo de ângulo. Se o seu processo "OK" de ângulo nunca foi abaixo de um certo valor, por exemplo, não faz sentido ter um limite mínimo muito mais baixo.
-            -   **Robustez a Outliers:** Percentis são menos sensíveis a outliers do que a média e desvio padrão. Isso significa que a janela proposta para o ângulo reflete com fidelidade a variação natural do seu processo "OK", sem ser distorcida por eventos extremos isolados.
+            -   **Robustez a Outliers:** Percentis são menos sensíveis a outliers do que a média e desvio padrão. Isso significa que a janela proposta para o ângulo reflete com fidelidade a variação natural do seu processo "OK", sem ser distorcida por eventos extremos.
             """)
 
         # --- 5. Próximos Passos e Recomendações ---
@@ -826,16 +836,13 @@ with tab2:
             """)
 
             # Sugerir valores iniciais para os inputs manuais
-            # Usar o valor atual do session_state, se já definido, ou calcular um valor inicial
-            # Isso evita que o valor inicial do number_input seja redefinido a cada rerun,
-            # mantendo o que o usuário digitou, a menos que seja a primeira vez ou o DF mude.
             if st.session_state.manual_ang_min == 0.0 and st.session_state.manual_ang_max == 0.0:
-                 min_ang_sug = st.session_state.df_filtered['ÂNG_rea'].min()
-                 max_ang_sug = st.session_state.df_filtered['ÂNG_rea'].max()
+                min_ang_sug = st.session_state.df_filtered['ÂNG_rea'].min()
+                max_ang_sug = st.session_state.df_filtered['ÂNG_rea'].max()
             else:
-                 min_ang_sug = st.session_state.manual_ang_min
-                 max_ang_sug = st.session_state.manual_ang_max
-
+                # Se já foram definidos (ex: pelo usuário), mantém o valor atual do session_state
+                min_ang_sug = st.session_state.manual_ang_min
+                max_ang_sug = st.session_state.manual_ang_max
 
             # Inputs para os novos limites manuais
             col_manual1, col_manual2 = st.columns(2)
@@ -854,12 +861,10 @@ with tab2:
             manual_tq_max = st.session_state.current_tq_max
 
             # Store manual TQ values in session state for the report tab.
-            # Essas linhas estão OK, pois manual_tq_min/max NÃO SÃO as chaves de um widget st.number_input
             st.session_state.manual_tq_min = manual_tq_min
             st.session_state.manual_tq_max = manual_tq_max
             # REMOVIDO: st.session_state.manual_ang_min = manual_ang_min (Já gerenciado pela key do widget)
             # REMOVIDO: st.session_state.manual_ang_max = manual_ang_max (Já gerenciado pela key do widget)
-
 
             # Validação simples dos inputs manuais
             if manual_ang_min >= manual_ang_max:
@@ -992,7 +997,7 @@ with tab2:
                     "Comparação Visual: Janela Nominal vs. Janela Definida Manualmente"
                 )
 
-                st.plotly_chart(fig_manual, use_container_width=True, key="comparison_manual_tab2") # Adicionada key
+                st.plotly_chart(fig_manual, use_container_width=True, key="comparison_manual_tab2")  # Adicionada key
 
 with tab3:
     st.title("RELATÓRIO DE ANÁLISE DE TORQUE E ÂNGULO")
@@ -1042,9 +1047,16 @@ with tab3:
         st.number_input(f"RPM aplicado:", key=f"step_rpm_aplicado_{i}")
         st.markdown("---")
 
-    if st.button("Adicionar Step", key="add_step_button"):
-        st.session_state.num_steps += 1
-        st.rerun()  # Rerun to display new step fields
+    col_step_btns = st.columns(2)
+    with col_step_btns[0]:
+        if st.button("Adicionar Step", key="add_step_button"):
+            st.session_state.num_steps += 1
+            st.rerun()  # Rerun to display new step fields
+    with col_step_btns[1]:
+        if st.session_state.num_steps > 1:
+            if st.button("Remover Último Step", key="remove_step_button"):
+                st.session_state.num_steps -= 1
+                st.rerun()
 
     # 5° Seção - Resultado da Análise de Ângulo
     st.subheader("5. Resultado da Análise de Ângulo")
@@ -1052,7 +1064,6 @@ with tab3:
     st.write(f"Intervalo: `{st.session_state.current_ang_min:.3f}°` à `{st.session_state.current_ang_max:.3f}°`")
 
     st.markdown("##### Nova Janela de Ângulo Após Análise:")
-    # Usar os valores da session_state diretamente, pois são populados via key do widget ou atribuição.
     st.write(f"Intervalo: `{st.session_state.manual_ang_min:.3f}°` à `{st.session_state.manual_ang_max:.3f}°`")
     st.write(f"Porcentagem de Restrição Obtida: `{st.session_state.percent_total_manual:.2f}%`")
 
@@ -1103,14 +1114,17 @@ with tab3:
             st.session_state.manual_ang_max, st.session_state.manual_tq_max,
             "Comparação Visual: Janela Nominal vs. Janela Definida Manualmente (Relatório)"
         )
-        st.plotly_chart(fig_manual_report, use_container_width=True, key="comparison_manual_report_tab3") # Adicionada key
+        st.plotly_chart(fig_manual_report, use_container_width=True,
+                        key="comparison_manual_report_tab3")  # Adicionada key
 
         st.markdown("##### Histograma de Torque Real com Curva Normal")
         histograms = generate_histograms(st.session_state.df_filtered)
-        st.plotly_chart(histograms['torque_histogram'], use_container_width=True, key="tq_hist_report_tab3") # Adicionada key
+        st.plotly_chart(histograms['torque_histogram'], use_container_width=True,
+                        key="tq_hist_report_tab3")  # Adicionada key
 
         st.markdown("##### Histograma de Ângulo Real com Curva Normal")
-        st.plotly_chart(histograms['angle_histogram'], use_container_width=True, key="ang_hist_report_tab3") # Adicionada key
+        st.plotly_chart(histograms['angle_histogram'], use_container_width=True,
+                        key="ang_hist_report_tab3")  # Adicionada key
     else:
         st.info("Carregue e filtre os dados para visualizar os gráficos e métricas.")
 
@@ -1121,12 +1135,20 @@ with tab3:
     st.checkbox("Validação ângulo por duplo aperto", key="val_duplo_aperto")
 
     for i in range(st.session_state.num_spacers):
-        col_spacer_val, col_spacer_btn = st.columns([0.8, 0.2])
+        col_spacer_val, _ = st.columns([0.8, 0.2])  # Usar _ para coluna não utilizada
         with col_spacer_val:
             st.number_input(f"Validação com espaçador de (mm):", key=f"spacer_val_{i}", format="%.3f")
-    if st.button("Adicionar Espaçador", key="add_spacer_button"):
-        st.session_state.num_spacers += 1
-        st.rerun()
+
+    col_spacer_btns = st.columns(2)
+    with col_spacer_btns[0]:
+        if st.button("Adicionar Espaçador", key="add_spacer_button"):
+            st.session_state.num_spacers += 1
+            st.rerun()
+    with col_spacer_btns[1]:
+        if st.session_state.num_spacers > 1:
+            if st.button("Remover Último Espaçador", key="remove_spacer_button"):
+                st.session_state.num_spacers -= 1
+                st.rerun()
 
     # 8° Seção - Imagem de validação
     st.subheader("8. Imagem de Validação")
@@ -1137,7 +1159,8 @@ with tab3:
     st.session_state.resultado_aprovado = st.radio(
         "Status da Análise:",
         ("Aprovado", "Reprovado"),
-        index=None if st.session_state.resultado_aprovado is None else (0 if st.session_state.resultado_aprovado == "Aprovado" else 1),
+        index=None if st.session_state.resultado_aprovado is None else (
+            0 if st.session_state.resultado_aprovado == "Aprovado" else 1),
         key="resultado_radio_selection"
     )
 
@@ -1153,9 +1176,17 @@ with tab3:
         st.text_input("Cargo/Função:", key=f"resp_analise_cargo_{i}")
         st.write("Assinatura: _________________________")
         st.markdown("---")
-    if st.button("Adicionar Responsável pela Análise", key="add_resp_analise_button"):
-        st.session_state.num_resp_analise += 1
-        st.rerun()
+
+    col_analise_btns = st.columns(2)
+    with col_analise_btns[0]:
+        if st.button("Adicionar Responsável pela Análise", key="add_resp_analise_button"):
+            st.session_state.num_resp_analise += 1
+            st.rerun()
+    with col_analise_btns[1]:
+        if st.session_state.num_resp_analise > 1:
+            if st.button("Remover Último Responsável pela Análise", key="remove_resp_analise_button"):
+                st.session_state.num_resp_analise -= 1
+                st.rerun()
 
     # 12° Seção - Responsabilidade pela aprovação
     st.subheader("12. Responsabilidade pela Aprovação")
@@ -1165,6 +1196,198 @@ with tab3:
         st.text_input("Cargo/Função:", key=f"resp_aprov_cargo_{i}")
         st.write("Assinatura: _________________________")
         st.markdown("---")
-    if st.button("Adicionar Responsável pela Aprovação", key="add_resp_aprov_button"):
-        st.session_state.num_resp_aprov += 1
-        st.rerun()
+
+    col_aprov_btns = st.columns(2)
+    with col_aprov_btns[0]:
+        if st.button("Adicionar Responsável pela Aprovação", key="add_resp_aprov_button"):
+            st.session_state.num_resp_aprov += 1
+            st.rerun()
+    with col_aprov_btns[1]:
+        if st.session_state.num_resp_aprov > 1:
+            if st.button("Remover Último Responsável pela Aprovação", key="remove_resp_aprov_button"):
+                st.session_state.num_resp_aprov -= 1
+                st.rerun()
+
+    # --- 13. Seção de Geração de Relatórios ---
+    st.subheader("13. Gerar Relatório")
+
+
+    # Função para gerar o relatório HTML
+    def generate_html_report():
+        # AQUI ESTÁ A CORREÇÃO: ADICIONE O 'f' ANTES DAS ASPAS TRIPLAS
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Relatório de Análise de Torque e Ângulo</title>
+            <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; color: #333; }}
+                h1 {{ color: #0056b3; text-align: center; }}
+                h2 {{ color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 5px; margin-top: 25px; }}
+                h3 {{ color: #007bff; margin-top: 20px; }}
+                p, ul {{ margin-bottom: 10px; line-height: 1.6; }}
+                .metric {{ background-color: #f8f9fa; border: 1px solid #e9ecef; padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
+                .metric strong {{ color: #0056b3; }}
+                .chart-container {{ margin-top: 20px; border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #fff; }}
+                .signature {{ margin-top: 40px; border-top: 1px dashed #999; padding-top: 5px; width: 300px; }}
+
+                /* Estilos para impressão */
+                @media print {{
+                    body {{ margin: 0; padding: 0; }}
+                    .chart-container {{ page-break-inside: avoid; }} /* Tenta evitar quebrar gráfico entre páginas */
+                    /* Adicione mais regras conforme necessário para controle de quebra de página, etc. */
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>Relatório de Análise de Torque e Ângulo</h1>
+            <p><strong>Data da Análise:</strong> {st.session_state.get('report_analysis_date', datetime.date.today()).strftime('%d/%m/%Y')}</p>
+
+            <h2>1. Informações do Processo</h2>
+            <p><strong>Modelo:</strong> {st.session_state.get('report_model', '-')}</p>
+            <p><strong>Gspas do Processo:</strong> {st.session_state.get('report_gspas', '-')}</p>
+            <p><strong>Workstation:</strong> {st.session_state.get('report_workstation', '-')}</p>
+            <p><strong>Nome do Processo:</strong> {st.session_state.get('report_process_name', '-')}</p>
+
+            <h2>3. Detalhamento</h2>
+            <p><strong>Tamanho da amostra:</strong> {st.session_state.get('report_sample_size', '-')}</p>
+            <p><strong>Número do JOB:</strong> {st.session_state.get('report_job_number', '-')}</p>
+            <p><strong>Número do programa (GP):</strong> {st.session_state.get('report_program_number', '-')}</p>
+            <p><strong>Número da ferramenta:</strong> {st.session_state.get('report_tool_number', '-')}</p>
+            <p><strong>Número da Virtual Station:</strong> {st.session_state.get('report_virtual_station', '-')}</p>
+
+            <h2>4. Estratégia Atual</h2>
+        """
+        for i in range(st.session_state.num_steps):
+            html_content += f"""
+            <h3>Step {i + 1}</h3>
+            <ul>
+                <li><strong>Torque aplicado (Nm):</strong> {st.session_state.get(f'step_tq_aplicado_{i}', '-')}</li>
+                <li><strong>Ângulo aplicado (°):</strong> {st.session_state.get(f'step_ang_aplicado_{i}', '-')}</li>
+                <li><strong>Faixa de torque aplicada +- (Nm):</strong> {st.session_state.get(f'step_tq_faixa_{i}', '-')}</li>
+                <li><strong>Faixa de ângulo aplicada +- (°):</strong> {st.session_state.get(f'step_ang_faixa_{i}', '-')}</li>
+                <li><strong>RPM aplicado:</strong> {st.session_state.get(f'step_rpm_aplicado_{i}', '-')}</li>
+            </ul>
+            """
+        html_content += f"""
+            <h2>5. Resultado da Análise de Ângulo</h2>
+            <p><strong>Janela Ângulo Atual:</strong> {st.session_state.current_ang_min:.3f}° à {st.session_state.current_ang_max:.3f}°</p>
+            <p><strong>Nova Janela de Ângulo Após Análise:</strong> {st.session_state.manual_ang_min:.3f}° à {st.session_state.manual_ang_max:.3f}°</p>
+            <p><strong>Porcentagem de Restrição Obtida:</strong> {st.session_state.percent_total_manual:.2f}%</p>
+
+            <h2>6. Gráficos e Métricas da Análise Manual</h2>
+            <h3>Métricas dos Dados Reais:</h3>
+            <div class="metric">
+                <p><strong>Torque Real Mínimo (Nm):</strong> {st.session_state.df_filtered['TQ_rea'].min():.3f}</p>
+                <p><strong>Torque Real Máximo (Nm):</strong> {st.session_state.df_filtered['TQ_rea'].max():.3f}</p>
+            </div>
+            <div class="metric">
+                <p><strong>Ângulo Real Mínimo (°):</strong> {st.session_state.df_filtered['ÂNG_rea'].min():.3f}</p>
+                <p><strong>Ângulo Real Máximo (°):</strong> {st.session_state.df_filtered['ÂNG_rea'].max():.3f}</p>
+            </div>
+
+            <h3>Métricas de Capacidade (Cp/Cpk) com Limites Manuais:</h3>
+            <div class="metric">
+                <p><strong>Cp Torque:</strong> {'Perfeito' if st.session_state.cp_tq_manual == float('inf') else st.session_state.cp_tq_manual:.2f}</p>
+                <p><strong>Cpk Torque:</strong> {'Perfeito' if st.session_state.cpk_tq_manual == float('inf') else st.session_state.cpk_tq_manual:.2f}</p>
+            </div>
+            <div class="metric">
+                <p><strong>Cp Ângulo:</strong> {'Perfeito' if st.session_state.cp_ang_manual == float('inf') else st.session_state.cp_ang_manual:.2f}</p>
+                <p><strong>Cpk Ângulo:</strong> {'Perfeito' if st.session_state.cpk_ang_manual == float('inf') else st.session_state.cpk_ang_manual:.2f}</p>
+            </div>
+
+            <h3>Gráficos Interativos:</h3>
+        """
+
+        # Gerar os gráficos Plotly como HTML e incorporá-los
+        if st.session_state.df_filtered is not None and not st.session_state.df_filtered.empty:
+            fig_manual_report_html = generate_comparison_chart(
+                st.session_state.df_filtered,
+                st.session_state.current_ang_min, st.session_state.current_tq_min,
+                st.session_state.current_ang_max, st.session_state.current_tq_max,
+                st.session_state.manual_ang_min, st.session_state.manual_tq_min,
+                st.session_state.manual_ang_max, st.session_state.manual_tq_max,
+                "Comparação Visual: Janela Nominal vs. Janela Definida Manualmente"
+            )
+            histograms_html = generate_histograms(st.session_state.df_filtered)
+
+            # Use fig.to_html() para obter o HTML do gráfico
+            html_content += "<div class= chart - container><h4>Comparação Visual: Janela Nominal vs. Janela Definida Manualmente</h4>"
+            html_content += fig_manual_report_html.to_html(full_html=False, include_plotlyjs='cdn')
+            html_content += "</div>"
+
+            html_content += "<div class=chart - container><h4>Histograma de Torque Real com Curva Normal</h4>"
+            html_content += histograms_html['torque_histogram'].to_html(full_html=False, include_plotlyjs='cdn')
+            html_content += "</div>"
+
+            html_content += "<div class= chart - container ><h4>Histograma de Ângulo Real com Curva Normal</h4>"
+            html_content += histograms_html['angle_histogram'].to_html(full_html=False, include_plotlyjs='cdn')
+            html_content += "</div>"
+        else:
+            html_content += "<p>Dados não carregados/filtrados para gerar gráficos interativos.</p>"
+
+        html_content += f"""
+            <h2>7. Método da Validação</h2>
+            <ul>
+                <li><strong>Validação do ângulo por falta de pré-rosqueio:</strong> {'Sim' if st.session_state.get('val_falta_prerosqueio', False) else 'Não'}</li>
+                <li><strong>Validação do ângulo por pré-rosqueio excessivo:</strong> {'Sim' if st.session_state.get('val_prerosqueio_excessivo', False) else 'Não'}</li>
+                <li><strong>Validação ângulo por duplo aperto:</strong> {'Sim' if st.session_state.get('val_duplo_aperto', False) else 'Não'}</li>
+        """
+        for i in range(st.session_state.num_spacers):
+            html_content += f"<li><strong>Validação com espaçador de (mm):</strong> {st.session_state.get(f'spacer_val_{i}', '-')}</li>"
+        html_content += f"""
+            </ul>
+
+            <h2>9. Resultado</h2>
+            <p><strong>Status da Análise:</strong> {st.session_state.get('resultado_radio_selection', '-')}</p>
+
+            <h2>10. Observações de Engenharia</h2>
+            <p>{st.session_state.get('report_observations', '-')}</p>
+
+            <h2>11. Responsabilidade pela Análise</h2>
+        """
+        for i in range(st.session_state.num_resp_analise):
+            html_content += f"""
+            <h3>Responsável {i + 1}</h3>
+            <p><strong>Nome:</strong> {st.session_state.get(f'resp_analise_nome_{i}', '-')}</p>
+            <p><strong>Cargo/Função:</strong> {st.session_state.get(f'resp_analise_cargo_{i}', '-')}</p>
+            <p class="signature">Assinatura</p>
+            """
+        html_content += f"""
+            <h2>12. Responsabilidade pela Aprovação</h2>
+        """
+        for i in range(st.session_state.num_resp_aprov):
+            html_content += f"""
+            <h3>Responsável {i + 1}</h3>
+            <p><strong>Nome:</strong> {st.session_state.get(f'resp_aprov_nome_{i}', '-')}</p>
+            <p><strong>Cargo/Função:</strong> {st.session_state.get(f'resp_aprov_cargo_{i}', '-')}</p>
+            <p class="signature">Assinatura</p>
+            """
+        html_content += f"""
+        <div class="disclaimer">
+            <p>Este relatório foi gerado automaticamente e reflete os dados e configurações inseridos na aplicação.</p>
+        </div>
+        </body>
+        </html>
+        """
+        return html_content
+
+
+    # Botão para Gerar e Baixar HTML
+    if st.button("Gerar Relatório HTML", key="generate_html_button"):
+        if st.session_state.df_filtered is None or st.session_state.df_filtered.empty:
+            st.warning("Por favor, carregue e filtre os dados antes de gerar o relatório HTML.")
+        else:
+            try:
+                html_report_content = generate_html_report()
+                st.download_button(
+                    label="Baixar Relatório HTML",
+                    data=html_report_content,
+                    file_name="relatorio_analise_aperto.html",
+                    mime="text/html"
+                )
+                st.success("Relatório HTML gerado com sucesso! Clique no botão para baixar.")
+            except Exception as e:
+                st.error(f"Ocorreu um erro ao gerar o HTML: {e}")
+                st.exception(e)  # Exibe o traceback completo para depuração
