@@ -1241,7 +1241,7 @@ with tab3:
             </style>
         </head>
         <body>
-            <h1>Relatório de Análise de Torque e Ângulo</h1>
+            <h1>Relatório de Análise de Torque e Ângulo - JLR </h1>
             <p><strong>Data da Análise:</strong> {st.session_state.get('report_analysis_date', datetime.date.today()).strftime('%d/%m/%Y')}</p>
 
             <h2>1. Informações do Processo</h2>
@@ -1287,7 +1287,7 @@ with tab3:
                 <p><strong>Ângulo Real Máximo (°):</strong> {st.session_state.df_filtered['ÂNG_rea'].max():.3f}</p>
             </div>
 
-            <h3>Métricas de Capacidade (Cp/Cpk) com Limites Manuais:</h3>
+            <h3>Métricas de Capacidade (Cp/Cpk) com Limites Calculados pela Engenharia JLR BR:</h3>
             <div class="metric">
                 <p><strong>Cp Torque:</strong> {'Perfeito' if st.session_state.cp_tq_manual == float('inf') else st.session_state.cp_tq_manual:.2f}</p>
                 <p><strong>Cpk Torque:</strong> {'Perfeito' if st.session_state.cpk_tq_manual == float('inf') else st.session_state.cpk_tq_manual:.2f}</p>
@@ -1297,7 +1297,7 @@ with tab3:
                 <p><strong>Cpk Ângulo:</strong> {'Perfeito' if st.session_state.cpk_ang_manual == float('inf') else st.session_state.cpk_ang_manual:.2f}</p>
             </div>
 
-            <h3>Gráficos Interativos:</h3>
+            <h3>Gráficos da Janela de aperto:</h3>
         """
 
         # Gerar os gráficos Plotly como HTML e incorporá-los
@@ -1308,12 +1308,12 @@ with tab3:
                 st.session_state.current_ang_max, st.session_state.current_tq_max,
                 st.session_state.manual_ang_min, st.session_state.manual_tq_min,
                 st.session_state.manual_ang_max, st.session_state.manual_tq_max,
-                "Comparação Visual: Janela Nominal vs. Janela Definida Manualmente"
+                "Comparação Visual: Janela Nominal vs. Janela Definida pela Engenharia JLR BR"
             )
             histograms_html = generate_histograms(st.session_state.df_filtered)
 
             # Use fig.to_html() para obter o HTML do gráfico
-            html_content += "<div class= chart - container><h4>Comparação Visual: Janela Nominal vs. Janela Definida Manualmente</h4>"
+            html_content += "<div class= chart - container><h4>Janela Nominal X Nova Janela JLR BR</h4>"
             html_content += fig_manual_report_html.to_html(full_html=False, include_plotlyjs='cdn')
             html_content += "</div>"
 
@@ -1366,7 +1366,7 @@ with tab3:
             """
         html_content += f"""
         <div class="disclaimer">
-            <p>Este relatório foi gerado automaticamente e reflete os dados e configurações inseridos na aplicação.</p>
+            <p>Este relatório foi gerado automaticamente e reflete os dados e configurações inseridos na aplicação pela Engenharia JLR BR.</p>
         </div>
         </body>
         </html>
@@ -1375,19 +1375,19 @@ with tab3:
 
 
     # Botão para Gerar e Baixar HTML
-    if st.button("Gerar Relatório HTML", key="generate_html_button"):
+    if st.button("Gerar Relatório Final", key="generate_html_button"):
         if st.session_state.df_filtered is None or st.session_state.df_filtered.empty:
-            st.warning("Por favor, carregue e filtre os dados antes de gerar o relatório HTML.")
+            st.warning("Por favor, carregue e filtre os dados antes de gerar o relatório Final.")
         else:
             try:
                 html_report_content = generate_html_report()
                 st.download_button(
-                    label="Baixar Relatório HTML",
+                    label="Baixar Relatório Final",
                     data=html_report_content,
                     file_name="relatorio_analise_aperto.html",
                     mime="text/html"
                 )
-                st.success("Relatório HTML gerado com sucesso! Clique no botão para baixar.")
+                st.success("Relatório Final gerado com sucesso! Clique no botão para baixar.")
             except Exception as e:
                 st.error(f"Ocorreu um erro ao gerar o HTML: {e}")
                 st.exception(e)  # Exibe o traceback completo para depuração
